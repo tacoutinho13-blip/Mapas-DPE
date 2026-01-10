@@ -7,12 +7,12 @@
   <title>Defensoria Itinerante - Mapa de Viagens</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://apis.google.com/js/api.js" async defer></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
     body {
       font-family: 'Plus Jakarta Sans', sans-serif;
     }
-    /* Estilização agressiva de barras de rolagem para desktop */
     .custom-scrollbar::-webkit-scrollbar {
       width: 10px;
       height: 10px;
@@ -29,23 +29,16 @@
     .custom-scrollbar::-webkit-scrollbar-thumb:hover {
       background: #94a3b8;
     }
-    /* Força barras em navegadores que suportam scrollbar-color */
     .custom-scrollbar {
       scrollbar-width: auto;
       scrollbar-color: #cbd5e1 #f1f5f9;
     }
-    
     .sync-pulse {
       animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
     }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: .5; }
-    }
-    
-    /* Utilitário para evitar que o PDF corte elementos */
-    .pdf-page-break {
-      page-break-after: always;
     }
   </style>
 <script type="importmap">
