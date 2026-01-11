@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
@@ -127,6 +126,11 @@ const App: React.FC = () => {
   const [gistId, setGistId] = useState<string>(localStorage.getItem('gh_gist_id') || "");
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [showCloudConfig, setShowCloudConfig] = useState(false);
+  
+  // Refs para controle de auto-sync
+  // Fix: Replaced NodeJS.Timeout with ReturnType<typeof setTimeout> to fix 'Cannot find namespace NodeJS' error
+  const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isInitialLoad = useRef(true);
 
   // Estados do Relatório
   const [reportSearch, setReportSearch] = useState("");
@@ -164,6 +168,88 @@ const App: React.FC = () => {
   const mapWidth = 900;
   const mapHeight = 700;
 
+  // --- Funções de Sincronização ---
+  const syncWithCloud = async (dataOverride?: { userStats: any, markerLibrary: any }) => {
+    const token = localStorage.getItem('gh_token');
+    const gId = localStorage.getItem('gh_gist_id');
+    
+    if (!token) return;
+    
+    setSyncStatus('syncing');
+    const dataToSync = dataOverride || { userStats, markerLibrary };
+    const fileName = "dpe_amazonas_v50.json";
+    
+    try {
+      let method = 'POST';
+      let url = 'https://api.github.com/gists';
+      const body: any = { 
+        description: "DPE Amazonas Itinerante - Backup Automático", 
+        public: false, 
+        files: { [fileName]: { content: JSON.stringify(dataToSync) } } 
+      };
+      
+      if (gId) { 
+        method = 'PATCH'; 
+        url = `https://api.github.com/gists/${gId}`; 
+      }
+      
+      const response = await fetch(url, { 
+        method, 
+        headers: { 
+          'Authorization': `token ${token}`, 
+          'Content-Type': 'application/json' 
+        }, 
+        body: JSON.stringify(body) 
+      });
+      
+      if (response.ok) {
+        const json = await response.json() as any;
+        if (!gId) {
+          setGistId(json.id);
+          localStorage.setItem('gh_gist_id', json.id);
+        }
+        setSyncStatus('success');
+        setTimeout(() => setSyncStatus('idle'), 3000);
+      } else { 
+        throw new Error('Erro na API'); 
+      }
+    } catch (e) { 
+      setSyncStatus('error'); 
+    }
+  };
+
+  const loadFromCloud = async () => {
+    const token = localStorage.getItem('gh_token');
+    const gId = localStorage.getItem('gh_gist_id');
+    
+    if (!token || !gId) return;
+    setSyncStatus('syncing');
+    
+    try {
+      const response = await fetch(`https://api.github.com/gists/${gId}`, { 
+        headers: { 'Authorization': `token ${token}` } 
+      });
+      
+      if (response.ok) {
+        const json = await response.json() as any;
+        const content = JSON.parse((Object.values(json.files)[0] as any).content);
+        
+        // Carregamento silencioso para não triggar o primeiro sync de volta
+        isInitialLoad.current = true;
+        setUserStats(content.userStats || {});
+        setMarkerLibrary(content.markerLibrary || []);
+        
+        setSyncStatus('success');
+        setTimeout(() => setSyncStatus('idle'), 2000);
+        return true;
+      }
+    } catch (e) { 
+      setSyncStatus('error'); 
+    }
+    return false;
+  };
+
+  // Carregamento Inicial
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -171,6 +257,7 @@ const App: React.FC = () => {
       setUserStats(parsed.userStats || {});
       setMarkerLibrary(parsed.markerLibrary || []);
     }
+    
     const loadData = async () => {
       setIsLoadingMap(true);
       try {
@@ -182,53 +269,42 @@ const App: React.FC = () => {
           setNamesMap(mapping);
         }
         if (gRes.ok) setGeoData(await gRes.json());
-      } finally { setIsLoadingMap(false); }
+        
+        // Tentar buscar da nuvem após carregar nomes
+        await loadFromCloud();
+      } finally { 
+        setIsLoadingMap(false); 
+        // Após carregar tudo, as próximas mudanças devem sincronizar
+        setTimeout(() => { isInitialLoad.current = false; }, 1000);
+      }
     };
     loadData();
   }, []);
 
+  // Monitor de Alterações para Auto-Sync e LocalStorage
   useEffect(() => {
+    // Salva sempre no LocalStorage (instantâneo)
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ userStats, markerLibrary }));
-  }, [userStats, markerLibrary]);
 
-  const syncWithCloud = async () => {
-    if (!githubToken) { setShowCloudConfig(true); return; }
-    setSyncStatus('syncing');
-    const dataToSync = { userStats, markerLibrary };
-    const fileName = "dpe_amazonas_v50.json";
-    try {
-      let method = 'POST';
-      let url = 'https://api.github.com/gists';
-      const body: any = { description: "DPE Amazonas Itinerante - Backup", public: false, files: { [fileName]: { content: JSON.stringify(dataToSync) } } };
-      if (gistId) { method = 'PATCH'; url = `https://api.github.com/gists/${gistId}`; }
-      const response = await fetch(url, { method, headers: { 'Authorization': `token ${githubToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (response.ok) {
-        const json = await response.json() as any;
-        setGistId(json.id);
-        localStorage.setItem('gh_gist_id', json.id);
-        setSyncStatus('success');
-        setTimeout(() => setSyncStatus('idle'), 3000);
-      } else { throw new Error('Erro na API'); }
-    } catch (e) { setSyncStatus('error'); }
+    // Se não for o carregamento inicial, agenda sincronização na nuvem
+    if (!isInitialLoad.current && githubToken) {
+      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+      
+      syncTimeoutRef.current = setTimeout(() => {
+        syncWithCloud();
+      }, 2000); // 2 segundos de debounce
+    }
+    
+    return () => {
+      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    };
+  }, [userStats, markerLibrary, githubToken]);
+
+  const saveGithubConfig = () => { 
+    localStorage.setItem('gh_token', githubToken); 
+    setShowCloudConfig(false); 
+    if (githubToken) syncWithCloud(); 
   };
-
-  const loadFromCloud = async () => {
-    if (!githubToken || !gistId) return;
-    setSyncStatus('syncing');
-    try {
-      const response = await fetch(`https://api.github.com/gists/${gistId}`, { headers: { 'Authorization': `token ${githubToken}` } });
-      if (response.ok) {
-        const json = await response.json() as any;
-        const content = JSON.parse((Object.values(json.files)[0] as any).content);
-        setUserStats(content.userStats || {});
-        setMarkerLibrary(content.markerLibrary || []);
-        setSyncStatus('success');
-        setTimeout(() => setSyncStatus('idle'), 3000);
-      }
-    } catch (e) { setSyncStatus('error'); }
-  };
-
-  const saveGithubConfig = () => { localStorage.setItem('gh_token', githubToken); setShowCloudConfig(false); if (githubToken) syncWithCloud(); };
 
   // --- Handlers de Mapa ---
   const onMouseDown = (e: React.MouseEvent) => {
@@ -388,7 +464,6 @@ const App: React.FC = () => {
 
   // --- Lógica de Dashboards ---
   const dashboardStats = useMemo(() => {
-    // FIX: Added type assertion to MunicipalityData[] to avoid 'unknown' type errors during reduce and sort operations.
     const statsArray = Object.values(userStats) as MunicipalityData[];
     const totalMissions = statsArray.reduce((acc, curr) => acc + curr.visits.length, 0);
     const totalAttendees = statsArray.reduce((acc, curr) => acc + curr.visits.reduce((vAcc, v) => vAcc + (v.attendanceCount || 0), 0), 0);
@@ -399,7 +474,6 @@ const App: React.FC = () => {
     const sortedByMissions = [...statsArray].sort((a,b) => b.visits.length - a.visits.length).slice(0, 5);
     const maxMissions = sortedByMissions[0]?.visits.length || 1;
 
-    // Filtro e Ordenação da Tabela
     let tableData = statsArray.filter(m => m.name.toLowerCase().includes(reportSearch.toLowerCase()));
     
     tableData.sort((a, b) => {
@@ -434,10 +508,27 @@ const App: React.FC = () => {
   return (
     <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
       <header className="bg-slate-900 border-b-4 border-green-500 px-6 py-4 flex items-center justify-between shadow-2xl text-white shrink-0 no-print">
-        <div className="flex items-center gap-4"><div className="bg-green-600 p-2 rounded-xl"><Target className="w-6 h-6" /></div><div><h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1><p className="text-[9px] font-bold text-green-400 tracking-[0.3em] uppercase opacity-80">Gestão Regional Amazonas</p></div></div>
+        <div className="flex items-center gap-4">
+          <div className="bg-green-600 p-2 rounded-xl"><Target className="w-6 h-6" /></div>
+          <div>
+            <h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1>
+            <p className="text-[9px] font-bold text-green-400 tracking-[0.3em] uppercase opacity-80">Gestão Regional Amazonas</p>
+          </div>
+        </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center bg-slate-800 rounded-xl p-1 gap-1">
-             <button onClick={syncWithCloud} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'success' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}>{syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : <Cloud className="w-4 h-4"/>} Nuvem</button>
+             <button 
+              onClick={() => { syncWithCloud(); }} 
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${
+                syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : 
+                syncStatus === 'error' ? 'bg-red-600 text-white' : 
+                syncStatus === 'success' ? 'bg-green-600 text-white' : 
+                'hover:bg-slate-700 text-slate-300'
+              }`}
+             >
+              {syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'success' ? <Check className="w-4 h-4"/> : <Cloud className="w-4 h-4"/>} 
+              {syncStatus === 'syncing' ? 'Salvando...' : syncStatus === 'success' ? 'Sincronizado' : 'Nuvem'}
+             </button>
              <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400"><Github className="w-4 h-4"/></button>
           </div>
           <button onClick={() => setShowReport(true)} className="bg-green-600 hover:bg-green-500 px-5 py-3 rounded-xl text-xs font-black uppercase flex items-center gap-3 transition-all active:scale-95 shadow-xl"><LayoutDashboard className="w-4 h-4"/> Dashboards</button>
@@ -449,7 +540,6 @@ const App: React.FC = () => {
           {/* Busca */}
           <div className="absolute top-8 left-8 z-[90] w-80 no-print">
             <div className="flex items-center bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden px-5 focus-within:border-green-500 transition-all"><Search className="w-5 h-5 text-slate-400" /><input type="text" value={searchQuery} onFocus={() => setShowSearchList(true)} onChange={e => setSearchQuery(e.target.value)} placeholder="Pesquisar Município..." className="w-full py-4 px-3 text-xs font-bold outline-none" /></div>
-            {/* FIX: Added type assertion to n as string in search filter to avoid 'unknown' property error. */}
             {showSearchList && <motion.div className="mt-2 bg-white rounded-2xl shadow-4xl border border-slate-100 max-h-72 overflow-y-auto p-3 space-y-1">{(Object.entries(namesMap) as [string, string][]).filter(([_, n]) => n.toLowerCase().includes(searchQuery.toLowerCase())).map(([id, n]) => (<button key={id} onClick={() => focusCity(id)} className="w-full text-left p-4 hover:bg-green-600 hover:text-white rounded-xl text-[11px] font-black uppercase text-slate-700 transition-all">{n}</button>))}</motion.div>}
           </div>
 
