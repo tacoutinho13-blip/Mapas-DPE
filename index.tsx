@@ -31,7 +31,12 @@ import {
   RefreshCw,
   Github,
   Key,
-  Maximize
+  Maximize,
+  ArrowUpRight,
+  TrendingUp,
+  FileText,
+  Filter,
+  ArrowUpDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { geoIdentity, geoPath } from 'd3-geo';
@@ -122,6 +127,10 @@ const App: React.FC = () => {
   const [gistId, setGistId] = useState<string>(localStorage.getItem('gh_gist_id') || "");
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [showCloudConfig, setShowCloudConfig] = useState(false);
+
+  // Estados do Relatório
+  const [reportSearch, setReportSearch] = useState("");
+  const [reportSort, setReportSort] = useState<{key: 'name' | 'visits' | 'attendees', desc: boolean}>({key: 'visits', desc: true});
 
   const [layersVisibility, setLayersVisibility] = useState<LayersVisibility>({
     scheduled: true,
@@ -221,7 +230,7 @@ const App: React.FC = () => {
 
   const saveGithubConfig = () => { localStorage.setItem('gh_token', githubToken); setShowCloudConfig(false); if (githubToken) syncWithCloud(); };
 
-  // --- Handlers de Mapa (Pan e Zoom) ---
+  // --- Handlers de Mapa ---
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return; 
     isDraggingMap.current = true;
@@ -247,9 +256,6 @@ const App: React.FC = () => {
     const zoomIntensity = 0.1;
     const delta = -e.deltaY;
     const factor = Math.pow(1 + zoomIntensity, delta / 100);
-
-    // Pegar posição do mouse relativa ao container ANTES do setViewBoxTransform
-    // Em React, e.currentTarget pode ser null dentro de atualizadores de estado assíncronos
     const container = e.currentTarget;
     if (!container) return;
     const rect = container.getBoundingClientRect();
@@ -259,8 +265,6 @@ const App: React.FC = () => {
     setViewBoxTransform(prev => {
       const newK = Math.min(Math.max(prev.k * factor, 0.5), 25);
       const actualFactor = newK / prev.k;
-
-      // Ajustar X e Y para que o zoom ocorra sob o cursor
       return {
         x: mouseX - (mouseX - prev.x) * actualFactor,
         y: mouseY - (mouseY - prev.y) * actualFactor,
@@ -274,11 +278,8 @@ const App: React.FC = () => {
     setViewBoxTransform(prev => {
       const newK = Math.min(Math.max(prev.k * factor, 0.5), 25);
       const actualFactor = newK / prev.k;
-      
-      // Zoom em direção ao centro da tela
       const centerX = (selectedId ? (window.innerWidth * 0.35) : window.innerWidth / 2);
       const centerY = window.innerHeight / 2;
-
       return {
         x: centerX - (centerX - prev.x) * actualFactor,
         y: centerY - (centerY - prev.y) * actualFactor,
@@ -385,6 +386,51 @@ const App: React.FC = () => {
     setShowSearchList(false);
   };
 
+  // --- Lógica de Dashboards ---
+  const dashboardStats = useMemo(() => {
+    // FIX: Added type assertion to MunicipalityData[] to avoid 'unknown' type errors during reduce and sort operations.
+    const statsArray = Object.values(userStats) as MunicipalityData[];
+    const totalMissions = statsArray.reduce((acc, curr) => acc + curr.visits.length, 0);
+    const totalAttendees = statsArray.reduce((acc, curr) => acc + curr.visits.reduce((vAcc, v) => vAcc + (v.attendanceCount || 0), 0), 0);
+    const totalSchedules = statsArray.reduce((acc, curr) => acc + curr.scheduledTrips.length, 0);
+    const visitedCount = statsArray.filter(m => m.visits.length > 0).length;
+    const coveragePercent = Math.round((visitedCount / 62) * 100);
+
+    const sortedByMissions = [...statsArray].sort((a,b) => b.visits.length - a.visits.length).slice(0, 5);
+    const maxMissions = sortedByMissions[0]?.visits.length || 1;
+
+    // Filtro e Ordenação da Tabela
+    let tableData = statsArray.filter(m => m.name.toLowerCase().includes(reportSearch.toLowerCase()));
+    
+    tableData.sort((a, b) => {
+      let valA, valB;
+      if (reportSort.key === 'name') { valA = a.name; valB = b.name; }
+      else if (reportSort.key === 'visits') { valA = a.visits.length; valB = b.visits.length; }
+      else { 
+        valA = a.visits.reduce((acc, v) => acc + (v.attendanceCount || 0), 0);
+        valB = b.visits.reduce((acc, v) => acc + (v.attendanceCount || 0), 0);
+      }
+      
+      if (typeof valA === 'string') return reportSort.desc ? valB.toString().localeCompare(valA) : valA.localeCompare(valB.toString());
+      return reportSort.desc ? (valB as number) - (valA as number) : (valA as number) - (valB as number);
+    });
+
+    return { 
+      totalMissions, 
+      totalAttendees, 
+      totalSchedules, 
+      visitedCount, 
+      coveragePercent, 
+      topCities: sortedByMissions,
+      maxMissions,
+      tableData
+    };
+  }, [userStats, reportSearch, reportSort]);
+
+  const toggleSort = (key: 'name' | 'visits' | 'attendees') => {
+    setReportSort(prev => ({ key, desc: prev.key === key ? !prev.desc : true }));
+  };
+
   return (
     <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
       <header className="bg-slate-900 border-b-4 border-green-500 px-6 py-4 flex items-center justify-between shadow-2xl text-white shrink-0 no-print">
@@ -403,7 +449,8 @@ const App: React.FC = () => {
           {/* Busca */}
           <div className="absolute top-8 left-8 z-[90] w-80 no-print">
             <div className="flex items-center bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden px-5 focus-within:border-green-500 transition-all"><Search className="w-5 h-5 text-slate-400" /><input type="text" value={searchQuery} onFocus={() => setShowSearchList(true)} onChange={e => setSearchQuery(e.target.value)} placeholder="Pesquisar Município..." className="w-full py-4 px-3 text-xs font-bold outline-none" /></div>
-            {showSearchList && <motion.div className="mt-2 bg-white rounded-2xl shadow-4xl border border-slate-100 max-h-72 overflow-y-auto p-3 space-y-1">{Object.entries(namesMap).filter(([_, n]) => n.toLowerCase().includes(searchQuery.toLowerCase())).map(([id, n]) => (<button key={id} onClick={() => focusCity(id)} className="w-full text-left p-4 hover:bg-green-600 hover:text-white rounded-xl text-[11px] font-black uppercase text-slate-700 transition-all">{n}</button>))}</motion.div>}
+            {/* FIX: Added type assertion to n as string in search filter to avoid 'unknown' property error. */}
+            {showSearchList && <motion.div className="mt-2 bg-white rounded-2xl shadow-4xl border border-slate-100 max-h-72 overflow-y-auto p-3 space-y-1">{(Object.entries(namesMap) as [string, string][]).filter(([_, n]) => n.toLowerCase().includes(searchQuery.toLowerCase())).map(([id, n]) => (<button key={id} onClick={() => focusCity(id)} className="w-full text-left p-4 hover:bg-green-600 hover:text-white rounded-xl text-[11px] font-black uppercase text-slate-700 transition-all">{n}</button>))}</motion.div>}
           </div>
 
           {/* Botão de Visualização */}
@@ -546,7 +593,7 @@ const App: React.FC = () => {
               </div>
 
               <div className="space-y-10 pt-10 border-t">
-                {/* Agendamento (Próximas Visitas) */}
+                {/* Agendamento */}
                 <div className="bg-blue-50/50 p-8 rounded-[2.5rem] space-y-6 border border-blue-100 relative">
                   <h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-blue-800"><Calendar className="w-5 h-5 text-blue-600"/> {editingScheduleIdx !== null ? 'Editar Planejamento' : 'Planejar Viagem'}</h4>
                   <div className="space-y-4">
@@ -612,25 +659,160 @@ const App: React.FC = () => {
       <AnimatePresence>
         {showReport && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[500] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowReport(false)}>
-            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-5xl rounded-[3rem] overflow-hidden shadow-4xl flex flex-col max-h-[90vh]" onClick={e => e.stopPropagation()}>
-               <header className="p-10 bg-slate-900 text-white flex justify-between items-center">
-                  <div className="flex items-center gap-4"><BarChart3 className="w-8 h-8 text-green-500"/><h2 className="text-2xl font-black uppercase">Consolidado Regional AM</h2></div>
-                  <button onClick={() => setShowReport(false)} className="p-4 bg-white/5 rounded-2xl"><X/></button>
+            <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="bg-white w-full max-w-6xl rounded-[3rem] overflow-hidden shadow-4xl flex flex-col h-[90vh]" onClick={e => e.stopPropagation()}>
+               <header className="p-8 lg:p-10 bg-slate-900 text-white flex justify-between items-center shrink-0">
+                  <div className="flex items-center gap-4">
+                    <div className="bg-green-600 p-3 rounded-2xl"><BarChart3 className="w-8 h-8 text-white"/></div>
+                    <div>
+                      <h2 className="text-2xl font-black uppercase tracking-tight leading-tight">Painel de Impacto Regional</h2>
+                      <p className="text-[10px] font-bold text-green-400 uppercase tracking-widest opacity-80">Amazonas Itinerante - Consolidado</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => window.print()} className="px-5 py-3 bg-white/10 hover:bg-white/20 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 transition-all no-print"><FileText className="w-4 h-4"/> Exportar PDF</button>
+                    <button onClick={() => setShowReport(false)} className="p-4 bg-white/5 hover:bg-white/10 rounded-2xl transition-all no-print"><X/></button>
+                  </div>
                </header>
-               <div className="flex-1 overflow-y-auto p-12 bg-white custom-scrollbar">
-                  <table className="w-full text-left">
-                     <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400"><tr className="border-b"><th className="p-6">Município</th><th className="p-6">Missões</th><th className="p-6">Assistidos</th><th className="p-6 text-right">Ação</th></tr></thead>
-                     <tbody className="divide-y divide-slate-100">
-                        {Object.values(userStats).sort((a,b) => b.visits.length - a.visits.length).map(m => (
-                          <tr key={m.id} className="hover:bg-slate-50 transition-colors">
-                            <td className="p-6 font-black uppercase text-slate-800">{m.name}</td>
-                            <td className="p-6 font-bold">{m.visits.length}</td>
-                            <td className="p-6 font-black text-green-600 text-lg">{m.visits.reduce((acc, v) => acc + (v.attendanceCount || 0), 0).toLocaleString()}</td>
-                            <td className="p-6 text-right"><button onClick={() => { setShowReport(false); focusCity(m.id); }} className="p-3 bg-slate-100 rounded-xl hover:bg-green-600 hover:text-white transition-all"><Target className="w-4 h-4"/></button></td>
+
+               <div className="flex-1 overflow-y-auto bg-slate-50 p-8 lg:p-12 space-y-12 custom-scrollbar">
+                  {/* KPIs */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-3 relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform"><Target className="w-24 h-24"/></div>
+                      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Cobertura Estadual</p>
+                      <div className="flex items-baseline gap-2"><h3 className="text-4xl font-black text-slate-900">{dashboardStats.coveragePercent}%</h3><span className="text-xs font-bold text-green-600">({dashboardStats.visitedCount}/62)</span></div>
+                      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden"><motion.div initial={{width:0}} animate={{width: `${dashboardStats.coveragePercent}%`}} className="h-full bg-green-500"/></div>
+                    </div>
+                    <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-3 relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform"><Users className="w-24 h-24"/></div>
+                      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assistidos Totais</p>
+                      <h3 className="text-4xl font-black text-slate-900">{dashboardStats.totalAttendees.toLocaleString()}</h3>
+                      <p className="text-[10px] font-bold text-green-600 flex items-center gap-1"><TrendingUp className="w-3 h-3"/> Impacto Social Direto</p>
+                    </div>
+                    <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-3 relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform"><History className="w-24 h-24"/></div>
+                      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Missões Realizadas</p>
+                      <h3 className="text-4xl font-black text-slate-900">{dashboardStats.totalMissions}</h3>
+                      <p className="text-[10px] font-bold text-slate-500 uppercase">Frequência Operacional</p>
+                    </div>
+                    <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-3 relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform"><Calendar className="w-24 h-24"/></div>
+                      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Ações Planejadas</p>
+                      <h3 className="text-4xl font-black text-slate-900">{dashboardStats.totalSchedules}</h3>
+                      <p className="text-[10px] font-bold text-blue-600 uppercase">Calendário Futuro</p>
+                    </div>
+                  </div>
+
+                  {/* Gráficos */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div className="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm space-y-8">
+                      <div className="flex justify-between items-center">
+                        <h4 className="text-sm font-black uppercase text-slate-800 tracking-tight">Ranking: Municípios com Mais Missões</h4>
+                        <ArrowUpRight className="w-5 h-5 text-green-500"/>
+                      </div>
+                      <div className="space-y-6">
+                        {dashboardStats.topCities.map((city, i) => {
+                          const percent = Math.max(20, (city.visits.length / dashboardStats.maxMissions) * 100);
+                          return (
+                            <div key={city.id} className="space-y-2">
+                              <div className="flex justify-between items-end"><span className="text-[10px] font-black uppercase text-slate-600">{city.name}</span><span className="text-xs font-black text-slate-900">{city.visits.length} Missões</span></div>
+                              <div className="w-full h-4 bg-slate-50 rounded-lg overflow-hidden border border-slate-100">
+                                <motion.div 
+                                  initial={{width: 0}} 
+                                  animate={{width: `${percent}%`}} 
+                                  transition={{delay: i * 0.1}} 
+                                  className={`h-full bg-gradient-to-r ${i === 0 ? 'from-green-600 to-green-400' : 'from-slate-700 to-slate-500'}`}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center space-y-6 relative group overflow-hidden">
+                        <div className="absolute inset-0 bg-green-50 opacity-0 group-hover:opacity-10 transition-opacity pointer-events-none"/>
+                        <h4 className="text-sm font-black uppercase text-slate-800 tracking-tight">Status de Penetração AM</h4>
+                        <div className="relative w-48 h-48">
+                           <svg viewBox="0 0 100 100" className="w-full h-full transform -rotate-90">
+                             <circle cx="50" cy="50" r="45" fill="none" stroke="#f1f5f9" strokeWidth="8"/>
+                             <motion.circle 
+                              cx="50" cy="50" r="45" fill="none" 
+                              stroke="#16a34a" strokeWidth="8" 
+                              strokeDasharray="283" 
+                              initial={{strokeDashoffset: 283}}
+                              animate={{strokeDashoffset: 283 - (283 * dashboardStats.coveragePercent) / 100}}
+                              strokeLinecap="round"
+                             />
+                           </svg>
+                           <div className="absolute inset-0 flex flex-col items-center justify-center">
+                              <span className="text-3xl font-black text-slate-900">{dashboardStats.coveragePercent}%</span>
+                              <span className="text-[8px] font-bold text-slate-400 uppercase">Coberto</span>
+                           </div>
+                        </div>
+                        <p className="text-[10px] text-slate-500 font-medium max-w-[200px]">Representatividade operacional baseada na divisão territorial do IBGE.</p>
+                    </div>
+                  </div>
+
+                  {/* Tabela de Dados Expandida */}
+                  <div className="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                    <div className="p-8 border-b flex flex-col sm:flex-row justify-between items-center gap-6">
+                      <div className="flex items-center gap-3"><Filter className="w-5 h-5 text-slate-400"/><h4 className="text-sm font-black uppercase text-slate-800">Detalhamento por Unidade Territorial</h4></div>
+                      <div className="relative w-full sm:w-80">
+                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/>
+                         <input 
+                          type="text" 
+                          placeholder="Filtrar tabela..." 
+                          value={reportSearch} 
+                          onChange={e => setReportSearch(e.target.value)}
+                          className="w-full pl-12 pr-4 py-3 bg-slate-50 border rounded-2xl text-xs font-bold outline-none focus:border-green-500 transition-all"
+                         />
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead className="bg-slate-900 text-[10px] font-black uppercase text-slate-400">
+                          <tr>
+                            <th className="p-6 cursor-pointer hover:text-white transition-colors" onClick={() => toggleSort('name')}>
+                              <div className="flex items-center gap-2">Município <ArrowUpDown className="w-3 h-3"/></div>
+                            </th>
+                            <th className="p-6 cursor-pointer hover:text-white transition-colors" onClick={() => toggleSort('visits')}>
+                              <div className="flex items-center gap-2">Missões <ArrowUpDown className="w-3 h-3"/></div>
+                            </th>
+                            <th className="p-6 cursor-pointer hover:text-white transition-colors" onClick={() => toggleSort('attendees')}>
+                              <div className="flex items-center gap-2">Assistidos <ArrowUpDown className="w-3 h-3"/></div>
+                            </th>
+                            <th className="p-6">Média / Missão</th>
+                            <th className="p-6 text-right">Status</th>
                           </tr>
-                        ))}
-                     </tbody>
-                  </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {dashboardStats.tableData.length > 0 ? dashboardStats.tableData.map(m => {
+                            const att = m.visits.reduce((acc, v) => acc + (v.attendanceCount || 0), 0);
+                            const avg = m.visits.length > 0 ? Math.round(att / m.visits.length) : 0;
+                            const hasSchedule = m.scheduledTrips.length > 0;
+
+                            return (
+                              <tr key={m.id} className="hover:bg-green-50/50 transition-colors group">
+                                <td className="p-6 font-black uppercase text-slate-800 text-xs">{m.name}</td>
+                                <td className="p-6"><span className="bg-slate-100 group-hover:bg-white px-3 py-1 rounded-full text-[11px] font-black text-slate-700 border">{m.visits.length}</span></td>
+                                <td className="p-6 font-black text-slate-900">{att.toLocaleString()}</td>
+                                <td className="p-6 text-[11px] font-bold text-slate-500">{avg} assistidos/missão</td>
+                                <td className="p-6 text-right">
+                                  <div className="flex justify-end items-center gap-3">
+                                    {hasSchedule && <span className="text-[8px] font-black bg-blue-100 text-blue-600 px-2 py-1 rounded-md uppercase animate-pulse">Agenda Ativa</span>}
+                                    <button onClick={() => { setShowReport(false); focusCity(m.id); }} className="p-3 bg-slate-100 group-hover:bg-green-600 group-hover:text-white rounded-xl transition-all"><Target className="w-4 h-4"/></button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          }) : (
+                            <tr><td colSpan={5} className="p-20 text-center"><p className="text-[10px] font-black uppercase text-slate-400">Nenhum dado encontrado para "{reportSearch}"</p></td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                </div>
             </motion.div>
           </motion.div>
