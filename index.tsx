@@ -30,7 +30,8 @@ import {
   CloudOff,
   RefreshCw,
   Github,
-  Key
+  Key,
+  Maximize
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { geoIdentity, geoPath } from 'd3-geo';
@@ -220,14 +221,73 @@ const App: React.FC = () => {
 
   const saveGithubConfig = () => { localStorage.setItem('gh_token', githubToken); setShowCloudConfig(false); if (githubToken) syncWithCloud(); };
 
-  const onMouseDown = (e: React.MouseEvent) => { if (e.button !== 0) return; isDraggingMap.current = true; mapHasMoved.current = false; lastMousePos.current = { x: e.clientX, y: e.clientY }; };
+  // --- Handlers de Mapa (Pan e Zoom) ---
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return; 
+    isDraggingMap.current = true;
+    mapHasMoved.current = false;
+    lastMousePos.current = { x: e.clientX, y: e.clientY };
+  };
+
   const onMouseMove = (e: React.MouseEvent) => {
     if (!isDraggingMap.current) return;
     const dx = e.clientX - lastMousePos.current.x;
     const dy = e.clientY - lastMousePos.current.y;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) { mapHasMoved.current = true; setViewBoxTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy })); lastMousePos.current = { x: e.clientX, y: e.clientY }; if (mapTooltip) hideTooltip(); }
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+      mapHasMoved.current = true;
+      setViewBoxTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      lastMousePos.current = { x: e.clientX, y: e.clientY };
+      if (mapTooltip) hideTooltip();
+    }
   };
+
   const onMouseUp = () => { isDraggingMap.current = false; };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    const zoomIntensity = 0.1;
+    const delta = -e.deltaY;
+    const factor = Math.pow(1 + zoomIntensity, delta / 100);
+
+    // Pegar posição do mouse relativa ao container ANTES do setViewBoxTransform
+    // Em React, e.currentTarget pode ser null dentro de atualizadores de estado assíncronos
+    const container = e.currentTarget;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    setViewBoxTransform(prev => {
+      const newK = Math.min(Math.max(prev.k * factor, 0.5), 25);
+      const actualFactor = newK / prev.k;
+
+      // Ajustar X e Y para que o zoom ocorra sob o cursor
+      return {
+        x: mouseX - (mouseX - prev.x) * actualFactor,
+        y: mouseY - (mouseY - prev.y) * actualFactor,
+        k: newK
+      };
+    });
+  };
+
+  const handleZoomButtons = (direction: 'in' | 'out') => {
+    const factor = direction === 'in' ? 1.4 : 1 / 1.4;
+    setViewBoxTransform(prev => {
+      const newK = Math.min(Math.max(prev.k * factor, 0.5), 25);
+      const actualFactor = newK / prev.k;
+      
+      // Zoom em direção ao centro da tela
+      const centerX = (selectedId ? (window.innerWidth * 0.35) : window.innerWidth / 2);
+      const centerY = window.innerHeight / 2;
+
+      return {
+        x: centerX - (centerX - prev.x) * actualFactor,
+        y: centerY - (centerY - prev.y) * actualFactor,
+        k: newK
+      };
+    });
+  };
+
+  const resetZoom = () => setViewBoxTransform({ x: 0, y: 0, k: 1 });
 
   const showTooltip = (data: MapTooltipState) => { if (tooltipTimerRef.current) window.clearTimeout(tooltipTimerRef.current); setMapTooltip(data); tooltipTimerRef.current = window.setTimeout(() => setMapTooltip(null), 2000); };
   const hideTooltip = () => { if (tooltipTimerRef.current) window.clearTimeout(tooltipTimerRef.current); setMapTooltip(null); };
@@ -309,12 +369,18 @@ const App: React.FC = () => {
   const projection = useMemo(() => geoData ? geoIdentity().reflectY(true).fitExtent([[50, 50], [mapWidth - 50, mapHeight - 70]], geoData) : null, [geoData]);
   const pathGenerator = useMemo(() => projection ? geoPath().projection(projection) : null, [projection]);
   const getFeatureId = useCallback((feature: any) => { const p = feature.properties || {}; return (p.codarea || p.codmun || p.CD_MUN || feature.id || "").toString(); }, []);
+  
   const focusCity = (id: string) => {
     if (!geoData || !pathGenerator) return;
     const feature = geoData.features.find((f: any) => getFeatureId(f) === id);
     if (!feature) return;
     const centroid = pathGenerator.centroid(feature);
-    setViewBoxTransform({ x: mapWidth / 2 - centroid[0] * 2.8, y: mapHeight / 2 - centroid[1] * 2.8, k: 2.8 });
+    const zoomLevel = 4;
+    setViewBoxTransform({ 
+      x: (selectedId ? (window.innerWidth * 0.35) : window.innerWidth / 2) - centroid[0] * zoomLevel, 
+      y: (window.innerHeight / 2) - centroid[1] * zoomLevel, 
+      k: zoomLevel 
+    });
     setSelectedId(id);
     setShowSearchList(false);
   };
@@ -333,14 +399,14 @@ const App: React.FC = () => {
       </header>
 
       <main className="flex-1 grid grid-cols-1 md:grid-cols-12 overflow-hidden relative">
-        <section className={`relative flex flex-col bg-white overflow-hidden ${selectedId ? 'md:col-span-7 lg:col-span-8' : 'md:col-span-12'}`} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}>
+        <section className={`relative flex flex-col bg-white overflow-hidden ${selectedId ? 'md:col-span-7 lg:col-span-8' : 'md:col-span-12'}`} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp} onWheel={handleWheel}>
           {/* Busca */}
           <div className="absolute top-8 left-8 z-[90] w-80 no-print">
             <div className="flex items-center bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden px-5 focus-within:border-green-500 transition-all"><Search className="w-5 h-5 text-slate-400" /><input type="text" value={searchQuery} onFocus={() => setShowSearchList(true)} onChange={e => setSearchQuery(e.target.value)} placeholder="Pesquisar Município..." className="w-full py-4 px-3 text-xs font-bold outline-none" /></div>
             {showSearchList && <motion.div className="mt-2 bg-white rounded-2xl shadow-4xl border border-slate-100 max-h-72 overflow-y-auto p-3 space-y-1">{Object.entries(namesMap).filter(([_, n]) => n.toLowerCase().includes(searchQuery.toLowerCase())).map(([id, n]) => (<button key={id} onClick={() => focusCity(id)} className="w-full text-left p-4 hover:bg-green-600 hover:text-white rounded-xl text-[11px] font-black uppercase text-slate-700 transition-all">{n}</button>))}</motion.div>}
           </div>
 
-          {/* Botão de Visualização (Restore) */}
+          {/* Botão de Visualização */}
           <div className="absolute top-8 right-8 z-[90] no-print">
             <button onClick={() => setShowLayers(!showLayers)} className={`p-4 rounded-2xl shadow-2xl transition-all flex items-center gap-3 border ${showLayers ? 'bg-slate-900 text-white border-slate-800' : 'bg-white text-slate-900 border-slate-200'}`}>
               <Layers className="w-5 h-5" />
@@ -379,6 +445,13 @@ const App: React.FC = () => {
                 </motion.div>
               )}
             </AnimatePresence>
+          </div>
+
+          {/* Controles de Zoom Flutuantes */}
+          <div className="absolute bottom-10 left-8 z-[90] flex flex-col gap-2 no-print">
+            <button onClick={() => handleZoomButtons('in')} className="p-4 bg-white border border-slate-200 rounded-2xl shadow-2xl hover:bg-slate-50 transition-all text-slate-900 active:scale-95"><Plus className="w-5 h-5"/></button>
+            <button onClick={() => handleZoomButtons('out')} className="p-4 bg-white border border-slate-200 rounded-2xl shadow-2xl hover:bg-slate-50 transition-all text-slate-900 active:scale-95"><Minus className="w-5 h-5"/></button>
+            <button onClick={resetZoom} className="p-4 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl hover:bg-slate-800 transition-all text-white mt-2 active:scale-95" title="Resetar Visão"><Maximize className="w-5 h-5"/></button>
           </div>
 
           <div className="flex-1 relative overflow-hidden bg-slate-50">
@@ -492,19 +565,18 @@ const App: React.FC = () => {
                   <div className="space-y-4">
                     <input value={visitTitle} onChange={e => setVisitTitle(e.target.value)} placeholder="Título da Missão" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white" />
                     <div className="grid grid-cols-2 gap-3"><input type="date" value={visitStart} onChange={e => setVisitStart(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /><input type="date" value={visitEnd} onChange={e => setVisitEnd(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /></div>
-                    <div className="relative"><Users className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/><input type="number" value={visitAttendance} onChange={e => setVisitAttendance(Number(e.target.value))} placeholder="Total de Assistidos" className="w-full p-5 pl-12 border rounded-2xl text-sm font-bold bg-white" /></div>
+                    <div className="relative"><Users className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/><input type="number" value={visitAttendance} onChange={(e) => setVisitAttendance(Number(e.target.value) || 0)} placeholder="Total de Assistidos" className="w-full p-5 pl-12 border rounded-2xl text-sm font-bold bg-white" /></div>
                     <textarea value={visitObs} onChange={e => setVisitObs(e.target.value)} placeholder="Observações..." className="w-full p-5 border rounded-2xl text-xs font-medium bg-white h-24 resize-none" />
                     <button onClick={saveVisit} className="w-full bg-green-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase hover:bg-green-700 shadow-lg flex items-center justify-center gap-3"><History className="w-4 h-4"/> Salvar Registro</button>
                   </div>
                 </div>
                 
-                {/* Marcadores Estratégicos (Restauração da Biblioteca) */}
+                {/* Marcadores Estratégicos */}
                 <div className="bg-orange-50/50 p-8 rounded-[2.5rem] space-y-6 border border-orange-100">
                   <h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-orange-800"><MapPin className="w-5 h-5 text-orange-600"/> Marcadores Estratégicos</h4>
                   <div className="space-y-4 pt-2">
                     <input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder="Nome do Marcador" className="w-full p-5 bg-white border rounded-2xl text-sm font-bold" />
                     
-                    {/* Biblioteca de Favoritos */}
                     {markerLibrary.length > 0 && (
                       <div className="flex gap-2 flex-wrap p-3 bg-white/50 rounded-2xl border-dashed border-2 border-orange-200">
                          {markerLibrary.map(lib => (
@@ -537,7 +609,6 @@ const App: React.FC = () => {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[600] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowCloudConfig(false)}><motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-md rounded-[2.5rem] overflow-hidden shadow-4xl" onClick={e => e.stopPropagation()}><header className="p-8 bg-slate-900 text-white flex justify-between items-center"><div className="flex items-center gap-4"><Github className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Configurar Nuvem</h2></div><button onClick={() => setShowCloudConfig(false)} className="p-2 hover:bg-white/10 rounded-lg"><X/></button></header><div className="p-10 space-y-6"><div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400 px-1 flex items-center gap-2"><Key className="w-3 h-3"/> GitHub Token (PAT)</label><input type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" className="w-full p-4 border rounded-xl text-xs font-bold outline-none" /><p className="text-[8px] text-slate-400">Crie um token com permissão 'Gist' para backup remoto.</p></div>{gistId && (<div className="space-y-1"><label className="text-[10px] font-black uppercase text-slate-400 px-1">ID do Backup</label><code className="block p-3 bg-slate-50 border rounded-xl text-[10px] text-slate-600 truncate">{gistId}</code></div>)}<div className="grid grid-cols-2 gap-3"><button onClick={loadFromCloud} disabled={!gistId} className="bg-slate-100 text-slate-600 p-4 rounded-xl text-[10px] font-black uppercase hover:bg-slate-200">Baixar</button><button onClick={saveGithubConfig} className="bg-green-600 text-white p-4 rounded-xl text-[10px] font-black uppercase">Salvar</button></div></div></motion.div></motion.div>
       )}</AnimatePresence>
 
-      {/* Relatório */}
       <AnimatePresence>
         {showReport && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[500] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowReport(false)}>
