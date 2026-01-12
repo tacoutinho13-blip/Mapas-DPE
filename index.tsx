@@ -42,10 +42,13 @@ import {
   ShieldCheck,
   Printer,
   Info,
-  Bookmark
+  Bookmark,
+  Download,
+  Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { geoIdentity, geoPath } from 'd3-geo';
+import Papa from 'papaparse';
 
 // --- Tipos ---
 type VisitPurpose = 'trabalho' | 'lazer' | 'passagem' | 'todos';
@@ -133,6 +136,7 @@ const App: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoadingMap, setIsLoadingMap] = useState(true);
   const [showReport, setShowReport] = useState(false);
+  const [showImportExport, setShowImportExport] = useState(false);
   const [mapTooltip, setMapTooltip] = useState<MapTooltipState | null>(null);
   const [showLayers, setShowLayers] = useState(false);
   const tooltipTimerRef = useRef<number | null>(null);
@@ -392,6 +396,72 @@ const App: React.FC = () => {
     });
   };
 
+  // --- Módulo de Importação/Exportação ---
+  const downloadTemplate = () => {
+    const csvContent = "Município,Título,Início (AAAA-MM-DD),Fim (AAAA-MM-DD),Tipo (Realizada ou Planejada),Assistidos,Observações\nManaus,Missão de Teste,2024-01-01,2024-01-05,Realizada,150,Observação teste aqui\nParintins,Ação Futura,2024-12-25,2024-12-30,Planejada,0,Exemplo de agendamento";
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.setAttribute("download", "modelo_importacao_itinerante.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        const data = results.data as any[];
+        let importedCount = 0;
+        let errors = 0;
+
+        const newUserStats = { ...userStats };
+        const normalizedNamesMap: Record<string, string> = {};
+        
+        // Criar um mapa reverso de nomes normalizados para IDs
+        Object.entries(namesMap).forEach(([id, name]) => {
+          normalizedNamesMap[normalize(name)] = id;
+        });
+
+        data.forEach(row => {
+          const rawCityName = row['Município'] || "";
+          const cityId = normalizedNamesMap[normalize(rawCityName)];
+
+          if (cityId) {
+            const type = (row['Tipo (Realizada ou Planejada)'] || "").toLowerCase();
+            const title = row['Título'] || "Sem Título";
+            const start = row['Início (AAAA-MM-DD)'] || new Date().toISOString().split('T')[0];
+            const end = row['Fim (AAAA-MM-DD)'] || start;
+            const obs = row['Observações'] || "";
+            const count = parseInt(row['Assistidos']) || 0;
+
+            if (!newUserStats[cityId]) {
+              newUserStats[cityId] = { id: cityId, name: namesMap[cityId], visits: [], scheduledTrips: [], customMarkers: [] };
+            }
+
+            if (type.includes("realizada")) {
+              newUserStats[cityId].visits.push({ title, startDate: start, endDate: end, purpose: 'trabalho', attendanceCount: count, observations: obs });
+            } else if (type.includes("planejada")) {
+              newUserStats[cityId].scheduledTrips.push({ title, startDate: start, endDate: end, observations: obs });
+            }
+            importedCount++;
+          } else {
+            errors++;
+          }
+        });
+
+        setUserStats(newUserStats);
+        alert(`Importação concluída!\nRegistros salvos: ${importedCount}\nMunicípios não reconhecidos: ${errors}`);
+        setShowImportExport(false);
+      }
+    });
+  };
+
   const projection = useMemo(() => geoData ? geoIdentity().reflectY(true).fitExtent([[50, 50], [mapWidth - 50, mapHeight - 70]], geoData) : null, [geoData]);
   const pathGenerator = useMemo(() => projection ? geoPath().projection(projection) : null, [projection]);
   const getFeatureId = useCallback((feature: any) => { const p = feature.properties || {}; return (p.codarea || p.codmun || p.CD_MUN || feature.id || "").toString(); }, []);
@@ -425,7 +495,6 @@ const App: React.FC = () => {
     return { totalMissions, totalAttendees, totalSchedules, visitedCount, coveragePercent, topCities: sortedByMissions, maxMissions: sortedByMissions[0]?.visits.length || 1, tableData };
   }, [userStats, reportSearch, reportSort]);
 
-  // Lista única de nomes dos marcadores salvos
   const uniqueMarkerLabels = useMemo(() => {
     const labels = markerLibrary.map(m => m.label);
     return Array.from(new Set(labels));
@@ -437,6 +506,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-4"><div className="bg-green-600 p-2 rounded-xl"><Target className="w-6 h-6" /></div><div><h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1><p className="text-[9px] font-bold text-green-400 tracking-[0.3em] uppercase opacity-80">Gestão Regional Amazonas</p></div></div>
         <div className="flex items-center gap-3">
           <div className="flex items-center bg-slate-800 rounded-xl p-1 gap-1">
+             <button onClick={() => setShowImportExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase text-slate-300 hover:bg-slate-700 transition-all"><Upload className="w-4 h-4"/> Importar/Exportar</button>
              <button onClick={() => { syncWithCloud(); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'success' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}>{syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'success' ? <ShieldCheck className="w-4 h-4"/> : <Cloud className="w-4 h-4"/>} {syncStatus === 'syncing' ? 'Salvando...' : syncStatus === 'success' ? 'Conectado' : 'Nuvem'}</button>
              <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400"><Github className="w-4 h-4"/></button>
           </div>
@@ -477,7 +547,6 @@ const App: React.FC = () => {
                       <div className="space-y-1">
                         {uniqueMarkerLabels.map(label => {
                           const isActive = layersVisibility.visibleFavoriteLabels.includes(label);
-                          // Achar a cor representativa deste label na library
                           const color = markerLibrary.find(m => m.label === label)?.color || "#cbd5e1";
                           
                           return (
@@ -520,7 +589,6 @@ const App: React.FC = () => {
                     
                     if (["SILVES", "BARREIRINHA", "MANAQUIRI", "TAPAUA", "COARI", "NOVO AIRAO"].includes(normalizedName)) dy = 6;
                     if (["NOVO AIRAO", "BORBA", "MANICORE", "PARINTINS", "MARAA", "FONTE BOA", "SANTA ISABEL DO RIO NEGRO"].includes(normalizedName)) dx = 5;
-                    // Abaixar Manaus ainda mais
                     if (normalizedName === "MANAUS") dy = 9;
                     
                     return (<text key={`text-${id}`} transform={`translate(${centroid[0] + dx}, ${centroid[1] + dy})`} fontSize={5.5} textAnchor="middle" pointerEvents="none" className={`font-black uppercase tracking-tight select-none ${id === MANAUS_ID ? 'fill-white' : 'fill-slate-900 opacity-60'}`}>{namesMap[id]}</text>);
@@ -540,14 +608,12 @@ const App: React.FC = () => {
                     let iconDy = 0;
                     if (["SILVES", "CAREIRO", "MANAQUIRI", "MANACAPURU", "AUTAZES", "NOVA OLINDA DO NORTE", "ANORI", "ALVARES", "ALVARAES", "ITACOATIARA"].includes(normalizedName)) iconDy = 8;
 
-                    // Filtro de marcadores: Respeita o toggle geral e os labels específicos se algum estiver selecionado
                     const filteredMarkers = (d.customMarkers || []).filter(m => {
                       if (!layersVisibility.markers) return false;
-                      // Se houver algum filtro de label ativo, só mostra se o label coincidir
                       if (layersVisibility.visibleFavoriteLabels.length > 0) {
                         return layersVisibility.visibleFavoriteLabels.includes(m.label);
                       }
-                      return true; // Sem filtro de label, mostra todos
+                      return true;
                     });
 
                     const allIcons = [...filteredMarkers.map(m => ({...m, type: 'marker' as const})), ...(layersVisibility.scheduled ? d.scheduledTrips || [] : []).map(s => ({...s, type: 'schedule' as const}))]; 
@@ -623,6 +689,34 @@ const App: React.FC = () => {
             </motion.aside>
           )}</AnimatePresence>
       </main>
+
+      <AnimatePresence>{showImportExport && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[600] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowImportExport(false)}>
+            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-lg rounded-[2.5rem] overflow-hidden shadow-4xl" onClick={e => e.stopPropagation()}>
+              <header className="p-8 bg-slate-900 text-white flex justify-between items-center">
+                <div className="flex items-center gap-4"><Upload className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Importar Planilha</h2></div>
+                <button onClick={() => setShowImportExport(false)} className="p-2 hover:bg-white/10 rounded-full transition-all"><X/></button>
+              </header>
+              <div className="p-10 space-y-8 text-center">
+                <div className="p-8 border-2 border-dashed border-slate-200 rounded-[2rem] bg-slate-50 space-y-4">
+                  <p className="text-xs font-bold text-slate-600">Arraste seu arquivo CSV ou clique abaixo para selecionar</p>
+                  <label className="inline-block px-6 py-3 bg-green-600 text-white rounded-xl text-[10px] font-black uppercase cursor-pointer hover:bg-green-500 transition-all">
+                    Selecionar Arquivo
+                    <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+                  </label>
+                </div>
+                <div className="space-y-4">
+                  <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Não tem a planilha?</p>
+                  <button onClick={downloadTemplate} className="w-full p-4 bg-slate-100 border border-slate-200 rounded-xl text-[10px] font-black uppercase text-slate-700 hover:bg-slate-200 flex items-center justify-center gap-3 transition-all"><Download className="w-4 h-4"/> Baixar Modelo de Planilha</button>
+                </div>
+                <div className="p-5 bg-blue-50 rounded-2xl border border-blue-100 flex gap-4 items-start text-left">
+                  <Info className="w-5 h-5 text-blue-600 shrink-0 mt-1"/>
+                  <p className="text-[10px] font-bold text-blue-800 leading-relaxed uppercase">O sistema reconhecerá automaticamente o nome do município e distribuirá as informações entre ações realizadas e agendadas.</p>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+      )}</AnimatePresence>
 
       <AnimatePresence>{showCloudConfig && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[600] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowCloudConfig(false)}><motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-lg rounded-[2.5rem] overflow-hidden shadow-4xl" onClick={e => e.stopPropagation()}><header className="p-8 bg-slate-900 text-white flex justify-between items-center"><div className="flex items-center gap-4"><Github className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Vincular Dispositivos</h2></div><button onClick={() => setShowCloudConfig(false)} className="p-2"><X/></button></header><div className="p-10 space-y-8"><div className="p-6 bg-slate-50 border rounded-2xl space-y-4"><p className="text-[11px] font-bold text-slate-600 uppercase tracking-widest">Sua Chave Atual</p><button onClick={copyIdentity} className="w-full bg-slate-900 text-white p-4 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-2"><Copy className="w-4 h-4"/> Copiar Chave de Acesso</button></div><div className="space-y-4"><p className="text-[11px] font-bold text-slate-600 uppercase tracking-widest">Vincular Nova Chave</p><div className="flex gap-2"><input type="text" value={identityInput} onChange={e => setIdentityInput(e.target.value)} placeholder="Cole o código aqui..." className="flex-1 p-4 border rounded-xl text-xs font-bold outline-none bg-slate-50" /><button onClick={importIdentity} className="bg-green-600 text-white px-6 rounded-xl text-[10px] font-black uppercase">Vincular</button></div></div><div className="border-t pt-6 space-y-4"><p className="text-[10px] font-black uppercase text-slate-400">Manual (GitHub PAT)</p><input type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" className="w-full p-4 border rounded-xl text-xs font-bold" /><button onClick={saveGithubConfig} className="w-full bg-slate-900 text-white p-4 rounded-xl text-[10px] font-black uppercase">Salvar Manualmente</button></div></div></motion.div></motion.div>
