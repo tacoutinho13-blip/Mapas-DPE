@@ -44,11 +44,15 @@ import {
   Info,
   Bookmark,
   Download,
-  Upload
+  Upload,
+  Sparkles,
+  Zap,
+  BrainCircuit
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { geoIdentity, geoPath } from 'd3-geo';
 import Papa from 'papaparse';
+import { GoogleGenAI } from "@google/genai";
 
 // --- Tipos ---
 type VisitPurpose = 'trabalho' | 'lazer' | 'passagem' | 'todos';
@@ -112,6 +116,8 @@ const getDaysDiff = (dateStr: string) => {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
+const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+
 // --- Configurações ---
 const AM_GEOJSON_URL = "https://servicodados.ibge.gov.br/api/v3/malhas/estados/13?formato=application/vnd.geo+json&intrarregiao=municipio&qualidade=minima";
 const AM_NAMES_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/13/municipios";
@@ -147,6 +153,9 @@ const App: React.FC = () => {
   const [showCloudConfig, setShowCloudConfig] = useState(false);
   const [identityInput, setIdentityInput] = useState("");
   
+  const [aiInsights, setAiInsights] = useState<string | null>(null);
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isInitialLoad = useRef(true);
 
@@ -184,6 +193,38 @@ const App: React.FC = () => {
 
   const mapWidth = 900;
   const mapHeight = 700;
+
+  // --- IA Gemini Analysis ---
+  const generateAiAnalysis = async () => {
+    setIsGeneratingAi(true);
+    setAiInsights(null);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const stats = (Object.values(userStats) as MunicipalityData[]).map(m => ({
+        name: m.name,
+        missions: m.visits?.length || 0,
+        attendees: m.visits?.reduce((acc, v) => acc + (v.attendanceCount || 0), 0) || 0,
+        scheduled: m.scheduledTrips?.length || 0
+      })).filter(s => s.missions > 0 || s.scheduled > 0);
+
+      const prompt = `Analise estes dados de atuação itinerante da Defensoria Pública no Amazonas: ${JSON.stringify(stats)}. 
+      O estado tem 62 municípios no total. Forneça em Português:
+      1. Cobertura atual (%) e diagnóstico de vazios defensoriais.
+      2. Indicação de 3 municípios prioritários para as próximas ações.
+      3. Sugestão motivadora para a equipe de campo.
+      Seja conciso e use Markdown básico.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt
+      });
+      setAiInsights(response.text);
+    } catch (e) {
+      setAiInsights("Erro ao gerar análise. Tente novamente em instantes.");
+    } finally {
+      setIsGeneratingAi(false);
+    }
+  };
 
   // --- Funções de Sincronização ---
   const copyIdentity = () => {
@@ -366,6 +407,10 @@ const App: React.FC = () => {
     setMarkerLibrary(prev => [newMarker, ...prev]);
   };
 
+  const removeFromMarkerLibrary = (id: string) => {
+    setMarkerLibrary(prev => prev.filter(m => m.id !== id));
+  };
+
   const addMarker = (labelOverride?: string, colorOverride?: string) => {
     if (!selectedId) return;
     const label = labelOverride || markerLabel, color = colorOverride || markerColor;
@@ -381,8 +426,6 @@ const App: React.FC = () => {
     updateMunicipality(cityId, { [type]: list });
     hideTooltip();
   };
-
-  const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
 
   const toggleFavoriteFilter = (label: string) => {
     setLayersVisibility(prev => {
@@ -408,6 +451,28 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   };
 
+  const exportDataCSV = () => {
+    const allEntries: any[] = [];
+    (Object.values(userStats) as MunicipalityData[]).forEach(m => {
+      m.visits.forEach(v => allEntries.push({ Município: m.name, Tipo: 'Realizada', Título: v.title, Início: v.startDate, Fim: v.endDate, Assistidos: v.attendanceCount, Observações: v.observations }));
+      m.scheduledTrips.forEach(s => allEntries.push({ Município: m.name, Tipo: 'Planejada', Título: s.title, Início: s.startDate, Fim: s.endDate, Assistidos: 0, Observações: s.observations }));
+    });
+    
+    if (allEntries.length === 0) {
+      alert("Nenhum dado para exportar.");
+      return;
+    }
+
+    const csv = Papa.unparse(allEntries);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.setAttribute("download", `dados_itinerante_am_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -422,8 +487,6 @@ const App: React.FC = () => {
 
         const newUserStats = { ...userStats };
         const normalizedNamesMap: Record<string, string> = {};
-        
-        // Criar um mapa reverso de nomes normalizados para IDs
         Object.entries(namesMap).forEach(([id, name]) => {
           normalizedNamesMap[normalize(name)] = id;
         });
@@ -433,10 +496,10 @@ const App: React.FC = () => {
           const cityId = normalizedNamesMap[normalize(rawCityName)];
 
           if (cityId) {
-            const type = (row['Tipo (Realizada ou Planejada)'] || "").toLowerCase();
+            const type = (row['Tipo (Realizada ou Planejada)'] || row['Tipo'] || "").toLowerCase();
             const title = row['Título'] || "Sem Título";
-            const start = row['Início (AAAA-MM-DD)'] || new Date().toISOString().split('T')[0];
-            const end = row['Fim (AAAA-MM-DD)'] || start;
+            const start = row['Início (AAAA-MM-DD)'] || row['Início'] || new Date().toISOString().split('T')[0];
+            const end = row['Fim (AAAA-MM-DD)'] || row['Fim'] || start;
             const obs = row['Observações'] || "";
             const count = parseInt(row['Assistidos']) || 0;
 
@@ -506,7 +569,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-4"><div className="bg-green-600 p-2 rounded-xl"><Target className="w-6 h-6" /></div><div><h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1><p className="text-[9px] font-bold text-green-400 tracking-[0.3em] uppercase opacity-80">Gestão Regional Amazonas</p></div></div>
         <div className="flex items-center gap-3">
           <div className="flex items-center bg-slate-800 rounded-xl p-1 gap-1">
-             <button onClick={() => setShowImportExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase text-slate-300 hover:bg-slate-700 transition-all"><Upload className="w-4 h-4"/> Importar/Exportar</button>
+             <button onClick={() => setShowImportExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase text-slate-300 hover:bg-slate-700 transition-all"><Upload className="w-4 h-4"/> Sincronizar / CSV</button>
              <button onClick={() => { syncWithCloud(); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'success' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}>{syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'success' ? <ShieldCheck className="w-4 h-4"/> : <Cloud className="w-4 h-4"/>} {syncStatus === 'syncing' ? 'Salvando...' : syncStatus === 'success' ? 'Conectado' : 'Nuvem'}</button>
              <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400"><Github className="w-4 h-4"/></button>
           </div>
@@ -563,14 +626,6 @@ const App: React.FC = () => {
                             </button>
                           );
                         })}
-                        {layersVisibility.visibleFavoriteLabels.length > 0 && (
-                           <button 
-                             onClick={() => setLayersVisibility(prev => ({ ...prev, visibleFavoriteLabels: [] }))} 
-                             className="w-full text-center py-2 mt-2 text-[8px] font-black uppercase text-slate-400 hover:text-slate-600"
-                           >
-                             Limpar Filtros (Ver Todos)
-                           </button>
-                        )}
                       </div>
                     </div>
                   )}
@@ -582,47 +637,33 @@ const App: React.FC = () => {
                     const id = getFeatureId(f); 
                     const centroid = pathGenerator!.centroid(f); 
                     if (isNaN(centroid[0])) return null;
-                    
                     const normalizedName = normalize(namesMap[id] || "");
-                    let dx = 0;
-                    let dy = 0;
-                    
+                    let dx = 0, dy = 0;
                     if (["SILVES", "BARREIRINHA", "MANAQUIRI", "TAPAUA", "COARI", "NOVO AIRAO"].includes(normalizedName)) dy = 6;
                     if (["NOVO AIRAO", "BORBA", "MANICORE", "PARINTINS", "MARAA", "FONTE BOA", "SANTA ISABEL DO RIO NEGRO"].includes(normalizedName)) dx = 5;
                     if (normalizedName === "MANAUS") dy = 9;
-                    
                     return (<text key={`text-${id}`} transform={`translate(${centroid[0] + dx}, ${centroid[1] + dy})`} fontSize={5.5} textAnchor="middle" pointerEvents="none" className={`font-black uppercase tracking-tight select-none ${id === MANAUS_ID ? 'fill-white' : 'fill-slate-900 opacity-60'}`}>{namesMap[id]}</text>);
                   })}{geoData.features.map((f: any) => { 
                     const id = getFeatureId(f); 
                     const d = userStats[id]; 
                     const centroid = pathGenerator!.centroid(f); 
                     if (isNaN(centroid[0]) || !d) return null; 
-
                     const normalizedName = normalize(namesMap[id] || "");
-                    let nameDx = 0;
-                    let nameDy = 0;
+                    let nameDx = 0, nameDy = 0;
                     if (["SILVES", "BARREIRINHA", "MANAQUIRI", "TAPAUA", "COARI", "NOVO AIRAO"].includes(normalizedName)) nameDy = 6;
                     if (["NOVO AIRAO", "BORBA", "MANICORE", "PARINTINS", "MARAA", "FONTE BOA", "SANTA ISABEL DO RIO NEGRO"].includes(normalizedName)) nameDx = 5;
                     if (normalizedName === "MANAUS") nameDy = 9;
-
                     let iconDy = 0;
                     if (["SILVES", "CAREIRO", "MANAQUIRI", "MANACAPURU", "AUTAZES", "NOVA OLINDA DO NORTE", "ANORI", "ALVARES", "ALVARAES", "ITACOATIARA"].includes(normalizedName)) iconDy = 8;
-
                     const filteredMarkers = (d.customMarkers || []).filter(m => {
                       if (!layersVisibility.markers) return false;
-                      if (layersVisibility.visibleFavoriteLabels.length > 0) {
-                        return layersVisibility.visibleFavoriteLabels.includes(m.label);
-                      }
+                      if (layersVisibility.visibleFavoriteLabels.length > 0) return layersVisibility.visibleFavoriteLabels.includes(m.label);
                       return true;
                     });
-
                     const allIcons = [...filteredMarkers.map(m => ({...m, type: 'marker' as const})), ...(layersVisibility.scheduled ? d.scheduledTrips || [] : []).map(s => ({...s, type: 'schedule' as const}))]; 
-                    
                     return (<g key={`icons-${id}`} pointerEvents="none">{allIcons.map((item, idx) => { 
                       const angle = (idx / Math.max(allIcons.length - 1, 1)) * Math.PI - Math.PI/2, ox = Math.cos(angle) * (allIcons.length > 1 ? 5 : 0), oy = Math.sin(angle) * (allIcons.length > 1 ? 5 : 0) - 10; 
-                      const finalX = centroid[0] + ox + nameDx;
-                      const finalY = centroid[1] + oy + nameDy + iconDy;
-
+                      const finalX = centroid[0] + ox + nameDx, finalY = centroid[1] + oy + nameDy + iconDy;
                       if (item.type === 'marker') { 
                         return (<g key={`m-${idx}`} transform={`translate(${finalX}, ${finalY}) scale(1.1) translate(-12, -22)`} pointerEvents="auto" onMouseEnter={(e) => { e.stopPropagation(); showTooltip({ x: e.clientX, y: e.clientY, title: (item as any).label, color: (item as any).color, type: 'marker', cityId: id }); }} onMouseLeave={hideTooltip} className="cursor-help"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" fill={(item as any).color} stroke="white" strokeWidth="1.5" /><circle cx="12" cy="9" r="2.5" fill="white" /></g>); 
                       } else { 
@@ -651,38 +692,42 @@ const App: React.FC = () => {
               </div>
               <div className="space-y-10 pt-10 border-t">
                 <div className="bg-blue-50/50 p-8 rounded-[2.5rem] space-y-6 border border-blue-100"><h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-blue-800"><Calendar className="w-5 h-5 text-blue-600"/> Planejar</h4><input value={scheduleTitle} onChange={e => setScheduleTitle(e.target.value)} placeholder="Título da Ação" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white outline-none focus:ring-2 ring-blue-500/20" /><div className="grid grid-cols-2 gap-3"><input type="date" value={scheduleStart} onChange={e => setScheduleStart(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /><input type="date" value={scheduleEnd} onChange={e => setScheduleEnd(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /></div><textarea value={scheduleObs} onChange={e => setScheduleObs(e.target.value)} placeholder="Observações e detalhes..." className="w-full p-5 border rounded-2xl text-xs font-bold bg-white h-24 resize-none outline-none focus:ring-2 ring-blue-500/20" /><button onClick={saveSchedule} className="w-full bg-blue-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-blue-500/30">Salvar Agendamento</button></div>
-                
                 <div className="bg-green-50/30 p-8 rounded-[2.5rem] space-y-6 border border-green-100"><h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-green-800"><History className="w-5 h-5 text-green-600"/> Registrar</h4><input value={visitTitle} onChange={e => setVisitTitle(e.target.value)} placeholder="Título da Missão" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white" /><div className="grid grid-cols-2 gap-3"><input type="date" value={visitStart} onChange={e => setVisitStart(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /><input type="date" value={visitEnd} onChange={e => setVisitEnd(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /></div><input type="number" value={visitAttendance} onChange={(e) => setVisitAttendance(Number(e.target.value) || 0)} placeholder="Total de Assistidos" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white" /><textarea value={visitObs} onChange={e => setVisitObs(e.target.value)} placeholder="Principais ocorrências..." className="w-full p-5 border rounded-2xl text-xs font-bold bg-white h-24 resize-none" /><button onClick={saveVisit} className="w-full bg-green-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-green-500/30">Registrar Missão</button></div>
-                
                 <div className="bg-orange-50/50 p-8 rounded-[2.5rem] space-y-6 border border-orange-100">
                   <h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-orange-800"><MapPin className="w-5 h-5 text-orange-600"/> Novo Marcador</h4>
                   <div className="flex gap-2">
-                    <input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder="Ex: Sede, Base, Porto..." className="flex-1 p-5 border rounded-2xl text-sm font-bold bg-white" />
-                    <button onClick={saveToMarkerLibrary} className="p-4 bg-white border border-orange-200 rounded-2xl hover:bg-orange-100 transition-all text-orange-600" title="Salvar na Biblioteca"><Bookmark className="w-5 h-5"/></button>
+                    <input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder="Ex: Sede, Base, Porto..." className="flex-1 p-5 border rounded-2xl text-sm font-bold bg-white outline-none focus:ring-2 ring-orange-500/20" />
+                    <button onClick={saveToMarkerLibrary} className="p-4 bg-white border border-orange-200 rounded-2xl hover:bg-orange-100 transition-all text-orange-600 shadow-sm" title="Salvar na Biblioteca"><Bookmark className="w-5 h-5"/></button>
                   </div>
-                  <div className="flex gap-2 flex-wrap max-h-32 overflow-y-auto custom-scrollbar p-1">
-                    {PRESET_COLORS.map(c => (<button key={c} onClick={() => setMarkerColor(c)} className={`w-8 h-8 rounded-xl border-2 transition-transform active:scale-90 ${markerColor === c ? 'border-slate-900 scale-110' : 'border-transparent opacity-60'}`} style={{backgroundColor: c}} />))}
-                  </div>
-                  
+
                   {markerLibrary.length > 0 && (
-                    <div className="space-y-3">
-                      <p className="text-[8px] font-black uppercase text-slate-400 tracking-widest">Meus Marcadores Salvos</p>
-                      <div className="flex gap-2 flex-wrap">
-                        {markerLibrary.map((lib, idx) => (
-                          <button 
-                            key={lib.id} 
-                            onClick={() => { setMarkerLabel(lib.label); setMarkerColor(lib.color); }}
-                            className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-[9px] font-bold uppercase flex items-center gap-2 hover:border-orange-400 transition-all"
-                          >
-                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: lib.color }} />
-                            {lib.label}
-                            <Trash2 onClick={(e) => { e.stopPropagation(); setMarkerLibrary(prev => prev.filter(m => m.id !== lib.id)); }} className="w-3 h-3 text-slate-300 hover:text-red-500 ml-1" />
-                          </button>
+                    <div className="space-y-3 py-2 border-t border-orange-100/50">
+                      <p className="text-[9px] font-black uppercase text-orange-400 tracking-widest">Sua Biblioteca</p>
+                      <div className="flex flex-wrap gap-2">
+                        {markerLibrary.map((libMarker) => (
+                          <div key={libMarker.id} className="group relative">
+                            <button 
+                              onClick={() => addMarker(libMarker.label, libMarker.color)} 
+                              className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-100 rounded-xl hover:border-orange-400 hover:shadow-md transition-all text-[10px] font-bold text-slate-700"
+                            >
+                              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: libMarker.color }} />
+                              {libMarker.label}
+                            </button>
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); removeFromMarkerLibrary(libMarker.id); }} 
+                              className="absolute -top-1 -right-1 bg-white text-red-500 p-0.5 rounded-full border border-red-100 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
                         ))}
                       </div>
                     </div>
                   )}
-                  
+
+                  <div className="flex gap-2 flex-wrap max-h-32 overflow-y-auto custom-scrollbar p-1">
+                    {PRESET_COLORS.map(c => (<button key={c} onClick={() => setMarkerColor(c)} className={`w-8 h-8 rounded-xl border-2 transition-transform active:scale-90 ${markerColor === c ? 'border-slate-900 scale-110' : 'border-transparent opacity-60'}`} style={{backgroundColor: c}} />))}
+                  </div>
                   <button onClick={() => addMarker()} className="w-full bg-orange-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-orange-500/30">Fixar no Mapa</button>
                 </div>
               </div>
@@ -694,25 +739,23 @@ const App: React.FC = () => {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[600] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowImportExport(false)}>
             <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-lg rounded-[2.5rem] overflow-hidden shadow-4xl" onClick={e => e.stopPropagation()}>
               <header className="p-8 bg-slate-900 text-white flex justify-between items-center">
-                <div className="flex items-center gap-4"><Upload className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Importar Planilha</h2></div>
+                <div className="flex items-center gap-4"><Upload className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Dados CSV</h2></div>
                 <button onClick={() => setShowImportExport(false)} className="p-2 hover:bg-white/10 rounded-full transition-all"><X/></button>
               </header>
               <div className="p-10 space-y-8 text-center">
-                <div className="p-8 border-2 border-dashed border-slate-200 rounded-[2rem] bg-slate-50 space-y-4">
-                  <p className="text-xs font-bold text-slate-600">Arraste seu arquivo CSV ou clique abaixo para selecionar</p>
-                  <label className="inline-block px-6 py-3 bg-green-600 text-white rounded-xl text-[10px] font-black uppercase cursor-pointer hover:bg-green-500 transition-all">
-                    Selecionar Arquivo
-                    <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
-                  </label>
+                <div className="grid grid-cols-1 gap-4">
+                  <div className="p-8 border-2 border-dashed border-slate-200 rounded-[2rem] bg-slate-50 space-y-4">
+                    <p className="text-xs font-bold text-slate-600">Importar arquivo CSV</p>
+                    <label className="inline-block px-6 py-3 bg-green-600 text-white rounded-xl text-[10px] font-black uppercase cursor-pointer hover:bg-green-500 transition-all">
+                      Selecionar Arquivo
+                      <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+                    </label>
+                  </div>
+                  <button onClick={exportDataCSV} className="w-full p-5 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase flex items-center justify-center gap-3 hover:bg-slate-800 shadow-xl transition-all">
+                    <Download className="w-4 h-4 text-green-400"/> Exportar Meus Dados (CSV)
+                  </button>
                 </div>
-                <div className="space-y-4">
-                  <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Não tem a planilha?</p>
-                  <button onClick={downloadTemplate} className="w-full p-4 bg-slate-100 border border-slate-200 rounded-xl text-[10px] font-black uppercase text-slate-700 hover:bg-slate-200 flex items-center justify-center gap-3 transition-all"><Download className="w-4 h-4"/> Baixar Modelo de Planilha</button>
-                </div>
-                <div className="p-5 bg-blue-50 rounded-2xl border border-blue-100 flex gap-4 items-start text-left">
-                  <Info className="w-5 h-5 text-blue-600 shrink-0 mt-1"/>
-                  <p className="text-[10px] font-bold text-blue-800 leading-relaxed uppercase">O sistema reconhecerá automaticamente o nome do município e distribuirá as informações entre ações realizadas e agendadas.</p>
-                </div>
+                <button onClick={downloadTemplate} className="w-full p-4 bg-slate-100 border border-slate-200 rounded-xl text-[10px] font-black uppercase text-slate-700 hover:bg-slate-200 flex items-center justify-center gap-3 transition-all"><FileText className="w-4 h-4"/> Baixar Modelo em Branco</button>
               </div>
             </motion.div>
           </motion.div>
@@ -758,6 +801,29 @@ const App: React.FC = () => {
                       <h3 className="text-4xl font-black text-slate-900">{dashboardStats.totalSchedules}</h3>
                     </div>
                   </div>
+
+                  {/* IA Section - Inserida no local estratégico sem mudar o visual do resto */}
+                  <div className="bg-slate-900 rounded-[3rem] p-10 text-white relative overflow-hidden group shadow-2xl">
+                    <div className="absolute top-0 right-0 p-10 opacity-10 group-hover:opacity-20 transition-all pointer-events-none">
+                      <BrainCircuit className="w-56 h-56"/>
+                    </div>
+                    <div className="relative z-10 space-y-8">
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                        <div className="space-y-2">
+                          <h3 className="text-2xl font-black uppercase flex items-center gap-3 tracking-tight"><Sparkles className="text-yellow-400 w-6 h-6"/> IA Estratégica Gemini</h3>
+                          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Diagnóstico de vazios defensoriais e otimização de rotas</p>
+                        </div>
+                        <button onClick={generateAiAnalysis} disabled={isGeneratingAi} className="bg-white text-slate-900 px-8 py-4 rounded-2xl text-xs font-black uppercase flex items-center gap-3 hover:bg-green-400 transition-all shadow-xl disabled:opacity-50">
+                          {isGeneratingAi ? <RefreshCw className="animate-spin w-4 h-4"/> : <Zap className="w-4 h-4"/>} 
+                          {isGeneratingAi ? "Processando..." : "Gerar Nova Análise"}
+                        </button>
+                      </div>
+                      <div className="bg-white/5 backdrop-blur-md rounded-[2rem] p-8 min-h-[150px] border border-white/10 text-sm leading-relaxed text-slate-200">
+                        {aiInsights ? <div className="prose prose-invert prose-sm max-w-none">{aiInsights}</div> : <div className="flex flex-col items-center justify-center h-48 text-slate-400 italic"><Zap className="w-10 h-10 mb-4 opacity-20"/>Clique para cruzar os dados estaduais com a inteligência do Gemini.</div>}
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 break-inside-avoid">
                     <div className="bg-white p-10 rounded-[3rem] border border-slate-200 print-shadow-none space-y-8">
                       <h4 className="text-sm font-black uppercase text-slate-800 tracking-tight">Top 5: Municípios de Atuação</h4>
