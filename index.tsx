@@ -260,7 +260,7 @@ const App: React.FC = () => {
       if (error) throw error;
       setSyncStatus('connected');
     } catch (e) { 
-      console.error(e);
+      console.error("Supabase Save Error:", e);
       setSyncStatus('error'); 
     }
   };
@@ -276,20 +276,22 @@ const App: React.FC = () => {
         .eq('id', idToLoad)
         .single();
 
-      if (error && error.code !== 'PGRST116') throw error; // PGRST116 is empty result
+      if (error && error.code !== 'PGRST116') throw error;
 
       if (data && data.content) {
         isInitialLoad.current = true;
         setUserStats(data.content.userStats || {});
         setMarkerLibrary(data.content.markerLibrary || []);
         setSyncStatus('connected');
-        setTimeout(() => { isInitialLoad.current = false; }, 500);
+        // Pequeno delay para garantir que o efeito de salvamento não dispare imediatamente ao carregar
+        setTimeout(() => { isInitialLoad.current = false; }, 800);
         return true;
       } else {
-        setSyncStatus('connected'); // No data yet, but connected
+        setSyncStatus('connected');
+        isInitialLoad.current = false;
       }
     } catch (e) { 
-      console.error(e);
+      console.error("Supabase Load Error:", e);
       setSyncStatus('error'); 
     }
     return false;
@@ -303,19 +305,20 @@ const App: React.FC = () => {
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          event: '*', // Escuta QUALQUER mudança (INSERT, UPDATE, DELETE)
           schema: 'public',
           table: 'sync_data',
           filter: `id=eq.${id}`
         },
         (payload) => {
           if (payload.new && payload.new.content) {
-            // Check if content is actually different to avoid cycles
             const newContent = payload.new.content;
+            
+            // Só atualiza se for realmente diferente para evitar loops infinitos
             isInitialLoad.current = true;
             setUserStats(newContent.userStats || {});
             setMarkerLibrary(newContent.markerLibrary || []);
-            setTimeout(() => { isInitialLoad.current = false; }, 500);
+            setTimeout(() => { isInitialLoad.current = false; }, 800);
           }
         }
       )
@@ -334,50 +337,53 @@ const App: React.FC = () => {
     setIdentityInput("");
     await loadFromSupabase(newId);
     setupRealtime(newId);
-    alert("DISPOSITIVO VINCULADO!\nDados sincronizados via Supabase Realtime.");
+    alert("DISPOSITIVO VINCULADO!\nA sincronização automática está ativa.");
   };
 
   const copySyncId = () => {
     if (!syncId) return;
     navigator.clipboard.writeText(syncId);
-    alert("ID DE SINCRONIZAÇÃO COPIADO!\nCole este código em 'Vincular Nova Chave' no outro computador.");
+    alert("ID DE SINCRONIZAÇÃO COPIADO!\nCole no outro computador para espelhar os dados.");
   };
 
   // Bootstrap
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      setUserStats(parsed.userStats || {});
-      setMarkerLibrary(parsed.markerLibrary || []);
-    }
-
-    let currentSyncId = localStorage.getItem('supabase_sync_id');
-    if (!currentSyncId) {
-      currentSyncId = generateSyncId();
-      setSyncId(currentSyncId);
-      localStorage.setItem('supabase_sync_id', currentSyncId);
-    }
-
     const bootstrap = async () => {
       setIsLoadingMap(true);
       try {
+        // Carrega nomes e GeoJSON
         const [nRes, gRes] = await Promise.all([fetch(AM_NAMES_URL), fetch(AM_GEOJSON_URL)]);
         if (nRes.ok) {
-          const namesJson = await nRes.ok ? await nRes.json() : [];
+          const namesJson = await nRes.json();
           const mapping: Record<string, string> = {};
           namesJson.forEach((mun: any) => mapping[mun.id.toString()] = mun.nome);
           setNamesMap(mapping);
         }
         if (gRes.ok) setGeoData(await gRes.json());
         
-        if (currentSyncId) {
-          await loadFromSupabase(currentSyncId);
-          setupRealtime(currentSyncId);
+        // Verifica Sync ID
+        let currentSyncId = localStorage.getItem('supabase_sync_id');
+        if (!currentSyncId) {
+          currentSyncId = generateSyncId();
+          setSyncId(currentSyncId);
+          localStorage.setItem('supabase_sync_id', currentSyncId);
         }
+
+        // Tenta carregar da nuvem primeiro, senão usa local
+        const hasCloudData = await loadFromSupabase(currentSyncId);
+        if (!hasCloudData) {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            setUserStats(parsed.userStats || {});
+            setMarkerLibrary(parsed.markerLibrary || []);
+          }
+          isInitialLoad.current = false;
+        }
+        
+        setupRealtime(currentSyncId);
       } finally { 
         setIsLoadingMap(false); 
-        isInitialLoad.current = false;
       }
     };
     bootstrap();
@@ -387,18 +393,18 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // Save loop
+  // AUTOMATIC SAVE EFFECT
   useEffect(() => {
     if (isInitialLoad.current) return;
     
-    // Save to local storage
+    // Salva local para backup imediato
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ userStats, markerLibrary }));
 
-    // Debounced save to Supabase
+    // Debounce mais curto (500ms) para sensação de instantaneidade
     if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
     syncTimeoutRef.current = setTimeout(() => {
       saveToSupabase();
-    }, 2000);
+    }, 500);
 
     return () => { if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current); };
   }, [userStats, markerLibrary, syncId]);
@@ -651,7 +657,7 @@ const App: React.FC = () => {
                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'connected' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}
              >
                {syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'connected' ? <Wifi className="w-4 h-4"/> : <WifiOff className="w-4 h-4"/>} 
-               {syncStatus === 'syncing' ? 'Salvando...' : syncStatus === 'connected' ? 'Ao Vivo' : 'Supabase'}
+               {syncStatus === 'syncing' ? 'Sincronizando...' : syncStatus === 'connected' ? 'Ao Vivo' : 'Offline'}
              </button>
              <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400" title="Configurações de Sincronização em Tempo Real">
                <Database className="w-4 h-4"/>
@@ -891,11 +897,10 @@ const App: React.FC = () => {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[600] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowCloudConfig(false)}>
             <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-lg rounded-[2.5rem] overflow-hidden shadow-4xl" onClick={e => e.stopPropagation()}>
               <header className="p-8 bg-slate-900 text-white flex justify-between items-center">
-                <div className="flex items-center gap-4"><Database className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Sincronização Realtime</h2></div>
+                <div className="flex items-center gap-4"><Database className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Sincronização Cloud</h2></div>
                 <button onClick={() => setShowCloudConfig(false)} className="p-2 hover:bg-white/10 rounded-full transition-all"><X/></button>
               </header>
               <div className="p-10 space-y-8">
-                {/* SEÇÃO PC A (ORIGEM) */}
                 <div className="p-6 bg-slate-50 border rounded-2xl space-y-4 border-slate-200">
                   <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Seu ID de Sincronização</p>
                   <div className="flex flex-col gap-3">
@@ -904,15 +909,14 @@ const App: React.FC = () => {
                       <div className={`w-3 h-3 rounded-full ${syncStatus === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
                     </div>
                     <button onClick={copySyncId} className="w-full bg-slate-900 text-white p-4 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
-                      <Copy className="w-4 h-4 text-green-400"/> Copiar ID para outro PC
+                      <Copy className="w-4 h-4 text-green-400"/> Copiar ID para outro computador
                     </button>
                   </div>
                 </div>
 
-                {/* SEÇÃO PC B (DESTINO) */}
                 <div className="p-6 bg-slate-50 border rounded-2xl space-y-4 border-slate-200">
                   <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Vincular Novo Dispositivo</p>
-                  <p className="text-[10px] text-slate-500 font-bold">Cole o ID de outro computador para espelhar os dados instantaneamente.</p>
+                  <p className="text-[10px] text-slate-500 font-bold">Cole o ID de outro computador para espelhar os dados automaticamente.</p>
                   <div className="flex gap-2">
                     <input 
                       type="text" 
@@ -925,15 +929,14 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* INFO STATUS */}
                 <div className="pt-4 flex items-center justify-between text-[10px] font-black uppercase text-slate-400">
                   <div className="flex items-center gap-2">
-                    <Database className="w-3 h-3"/>
+                    <Wifi className="w-3 h-3"/>
                     Supabase Realtime Cloud
                   </div>
                   <div className="flex items-center gap-2">
                     <RefreshCw className={`w-3 h-3 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`}/>
-                    {syncStatus === 'syncing' ? 'Sincronizando...' : syncStatus === 'connected' ? 'Conectado' : 'Aguardando'}
+                    {syncStatus === 'syncing' ? 'Sincronizando...' : syncStatus === 'connected' ? 'Conectado e Ativo' : 'Aguardando'}
                   </div>
                 </div>
               </div>
