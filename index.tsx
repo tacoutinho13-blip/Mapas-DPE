@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
@@ -46,12 +47,22 @@ import {
   Upload,
   Sparkles,
   Zap,
-  BrainCircuit
+  BrainCircuit,
+  Database,
+  Link as LinkIcon,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { geoIdentity, geoPath } from 'd3-geo';
 import Papa from 'papaparse';
 import { GoogleGenAI } from "@google/genai";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+// --- Supabase Config ---
+const SUPABASE_URL = "https://nvagcwyjktzaejusdhoy.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_vFRIAg2AODilMLBZQSZDIA_JLF0fXYQ";
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // --- Tipos ---
 type VisitPurpose = 'trabalho' | 'lazer' | 'passagem' | 'todos';
@@ -117,9 +128,13 @@ const getDaysDiff = (dateStr: string) => {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
-const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300(\u036f]/g, "").toUpperCase();
+const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
 
-// --- Configurações ---
+const generateSyncId = () => {
+  return 'DPE-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+};
+
+// --- Configurações de UI ---
 const AM_GEOJSON_URL = "https://servicodados.ibge.gov.br/api/v3/malhas/estados/13?formato=application/vnd.geo+json&intrarregiao=municipio&qualidade=minima";
 const AM_NAMES_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/13/municipios";
 const STORAGE_KEY = "amazonas_travel_tracker_v51"; 
@@ -148,9 +163,9 @@ const App: React.FC = () => {
   const [showLayers, setShowLayers] = useState(false);
   const tooltipTimerRef = useRef<number | null>(null);
   
-  const [githubToken, setGithubToken] = useState<string>(localStorage.getItem('gh_token') || "");
-  const [gistId, setGistId] = useState<string>(localStorage.getItem('gh_gist_id') || "");
-  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
+  // Supabase states
+  const [syncId, setSyncId] = useState<string>(localStorage.getItem('supabase_sync_id') || "");
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error' | 'connected'>('idle');
   const [showCloudConfig, setShowCloudConfig] = useState(false);
   const [identityInput, setIdentityInput] = useState("");
   
@@ -159,6 +174,7 @@ const App: React.FC = () => {
 
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isInitialLoad = useRef(true);
+  const channelRef = useRef<any>(null);
 
   const [reportSearch, setReportSearch] = useState("");
   const [reportSort, setReportSort] = useState<{key: 'name' | 'visits' | 'attendees', desc: boolean}>({key: 'visits', desc: true});
@@ -227,85 +243,107 @@ const App: React.FC = () => {
     }
   };
 
-  // --- Funções de Sincronização ---
-  const copyIdentity = () => {
-    const identity = JSON.stringify({ token: githubToken, gistId: gistId });
-    const encoded = btoa(identity);
-    navigator.clipboard.writeText(encoded);
-    alert("CÓDIGO COPIADO!\nAgora vá ao PC B, clique no ícone do GitHub e cole este código no campo 'Vincular Nova Chave'.");
-  };
-
-  const importIdentity = () => {
-    try {
-      const decoded = atob(identityInput);
-      const parsed = JSON.parse(decoded);
-      if (parsed.token) {
-        setGithubToken(parsed.token);
-        localStorage.setItem('gh_token', parsed.token);
-      }
-      if (parsed.gistId) {
-        setGistId(parsed.gistId);
-        localStorage.setItem('gh_gist_id', parsed.gistId);
-      }
-      setIdentityInput("");
-      alert("IDENTIDADE VINCULADA!\nBaixando seus dados da nuvem agora...");
-      loadFromCloud(parsed.token, parsed.gistId);
-    } catch (e) {
-      alert("ERRO: O código que você colou não é uma chave de sincronização válida.");
-    }
-  };
-
-  const syncWithCloud = async (dataOverride?: { userStats: any, markerLibrary: any }) => {
-    const token = localStorage.getItem('gh_token');
-    const gId = localStorage.getItem('gh_gist_id');
-    if (!token) return;
+  // --- Supabase Synchronization Functions ---
+  const saveToSupabase = async (dataOverride?: { userStats: any, markerLibrary: any }) => {
+    if (!syncId) return;
     setSyncStatus('syncing');
     const dataToSync = dataOverride || { userStats, markerLibrary };
     try {
-      let method = 'POST', url = 'https://api.github.com/gists';
-      const body: any = { description: "DPE AM Itinerante - Backup", public: false, files: { "dpe_amazonas_v50.json": { content: JSON.stringify(dataToSync) } } };
-      if (gId) { method = 'PATCH'; url = `https://api.github.com/gists/${gId}`; }
-      const response = await fetch(url, { method, headers: { 'Authorization': `token ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (response.ok) {
-        const json = await response.json();
-        if (!gId) { setGistId(json.id); localStorage.setItem('gh_gist_id', json.id); }
-        setSyncStatus('success');
-        setTimeout(() => setSyncStatus('idle'), 2000);
-      }
-    } catch (e) { setSyncStatus('error'); }
+      const { error } = await supabase
+        .from('sync_data')
+        .upsert({ 
+          id: syncId, 
+          content: dataToSync, 
+          updated_at: new Date().toISOString() 
+        }, { onConflict: 'id' });
+
+      if (error) throw error;
+      setSyncStatus('connected');
+    } catch (e) { 
+      console.error(e);
+      setSyncStatus('error'); 
+    }
   };
 
-  const loadFromCloud = async (tokenOverride?: string, gistIdOverride?: string) => {
-    const token = tokenOverride || localStorage.getItem('gh_token');
-    const gId = gistIdOverride || localStorage.getItem('gh_gist_id');
-    if (!token || !gId) return;
+  const loadFromSupabase = async (idOverride?: string) => {
+    const idToLoad = idOverride || syncId;
+    if (!idToLoad) return;
     setSyncStatus('syncing');
     try {
-      const response = await fetch(`https://api.github.com/gists/${gId}?t=${Date.now()}`, { 
-        headers: { 
-          'Authorization': `token ${token}`, 
-          'Cache-Control': 'no-cache' 
-        } 
-      });
-      if (response.ok) {
-        const json = await response.json();
-        const content = JSON.parse((Object.values(json.files)[0] as any).content);
+      const { data, error } = await supabase
+        .from('sync_data')
+        .select('content')
+        .eq('id', idToLoad)
+        .single();
+
+      if (error && error.code !== 'PGRST116') throw error; // PGRST116 is empty result
+
+      if (data && data.content) {
         isInitialLoad.current = true;
-        setUserStats(content.userStats || {});
-        setMarkerLibrary(content.markerLibrary || []);
-        setSyncStatus('success');
-        setTimeout(() => { 
-          setSyncStatus('idle'); 
-          isInitialLoad.current = false; 
-        }, 1000);
+        setUserStats(data.content.userStats || {});
+        setMarkerLibrary(data.content.markerLibrary || []);
+        setSyncStatus('connected');
+        setTimeout(() => { isInitialLoad.current = false; }, 500);
         return true;
+      } else {
+        setSyncStatus('connected'); // No data yet, but connected
       }
     } catch (e) { 
+      console.error(e);
       setSyncStatus('error'); 
     }
     return false;
   };
 
+  // Setup Realtime Channel
+  const setupRealtime = useCallback((id: string) => {
+    if (channelRef.current) supabase.removeChannel(channelRef.current);
+
+    const channel = supabase.channel(`sync-${id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'sync_data',
+          filter: `id=eq.${id}`
+        },
+        (payload) => {
+          if (payload.new && payload.new.content) {
+            // Check if content is actually different to avoid cycles
+            const newContent = payload.new.content;
+            isInitialLoad.current = true;
+            setUserStats(newContent.userStats || {});
+            setMarkerLibrary(newContent.markerLibrary || []);
+            setTimeout(() => { isInitialLoad.current = false; }, 500);
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') setSyncStatus('connected');
+      });
+
+    channelRef.current = channel;
+  }, []);
+
+  const handleLinkSyncId = async () => {
+    if (!identityInput.trim()) return;
+    const newId = identityInput.trim().toUpperCase();
+    setSyncId(newId);
+    localStorage.setItem('supabase_sync_id', newId);
+    setIdentityInput("");
+    await loadFromSupabase(newId);
+    setupRealtime(newId);
+    alert("DISPOSITIVO VINCULADO!\nDados sincronizados via Supabase Realtime.");
+  };
+
+  const copySyncId = () => {
+    if (!syncId) return;
+    navigator.clipboard.writeText(syncId);
+    alert("ID DE SINCRONIZAÇÃO COPIADO!\nCole este código em 'Vincular Nova Chave' no outro computador.");
+  };
+
+  // Bootstrap
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -313,33 +351,57 @@ const App: React.FC = () => {
       setUserStats(parsed.userStats || {});
       setMarkerLibrary(parsed.markerLibrary || []);
     }
+
+    let currentSyncId = localStorage.getItem('supabase_sync_id');
+    if (!currentSyncId) {
+      currentSyncId = generateSyncId();
+      setSyncId(currentSyncId);
+      localStorage.setItem('supabase_sync_id', currentSyncId);
+    }
+
     const bootstrap = async () => {
       setIsLoadingMap(true);
       try {
         const [nRes, gRes] = await Promise.all([fetch(AM_NAMES_URL), fetch(AM_GEOJSON_URL)]);
         if (nRes.ok) {
-          const namesJson = await nRes.json();
+          const namesJson = await nRes.ok ? await nRes.json() : [];
           const mapping: Record<string, string> = {};
           namesJson.forEach((mun: any) => mapping[mun.id.toString()] = mun.nome);
           setNamesMap(mapping);
         }
         if (gRes.ok) setGeoData(await gRes.json());
-        await loadFromCloud();
-      } finally { setIsLoadingMap(false); }
+        
+        if (currentSyncId) {
+          await loadFromSupabase(currentSyncId);
+          setupRealtime(currentSyncId);
+        }
+      } finally { 
+        setIsLoadingMap(false); 
+        isInitialLoad.current = false;
+      }
     };
     bootstrap();
+
+    return () => {
+      if (channelRef.current) supabase.removeChannel(channelRef.current);
+    };
   }, []);
 
+  // Save loop
   useEffect(() => {
+    if (isInitialLoad.current) return;
+    
+    // Save to local storage
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ userStats, markerLibrary }));
-    if (!isInitialLoad.current && githubToken) {
-      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
-      syncTimeoutRef.current = setTimeout(() => syncWithCloud(), 1500);
-    }
-    return () => { if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current); };
-  }, [userStats, markerLibrary, githubToken]);
 
-  const saveGithubConfig = () => { localStorage.setItem('gh_token', githubToken); setShowCloudConfig(false); if (githubToken) syncWithCloud(); };
+    // Debounced save to Supabase
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    syncTimeoutRef.current = setTimeout(() => {
+      saveToSupabase();
+    }, 2000);
+
+    return () => { if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current); };
+  }, [userStats, markerLibrary, syncId]);
 
   // --- Handlers ---
   const onMouseDown = (e: React.MouseEvent) => { if (e.button !== 0) return; isDraggingMap.current = true; mapHasMoved.current = false; lastMousePos.current = { x: e.clientX, y: e.clientY }; };
@@ -577,13 +639,23 @@ const App: React.FC = () => {
   return (
     <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
       <header className="bg-slate-900 border-b-4 border-green-500 px-6 py-4 flex items-center justify-between shadow-2xl text-white shrink-0 no-print">
-        <div className="flex items-center gap-4"><div className="bg-green-600 p-2 rounded-xl"><Target className="w-6 h-6" /></div><div><h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1><p className="text-[9px] font-bold text-green-400 tracking-[0.3em] uppercase opacity-80">Gestão Regional Amazonas</p></div></div>
+        <div className="flex items-center gap-4">
+          <div className="bg-green-600 p-2 rounded-xl"><Target className="w-6 h-6" /></div>
+          <div><h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1><p className="text-[9px] font-bold text-green-400 tracking-[0.3em] uppercase opacity-80">Gestão Regional Amazonas</p></div>
+        </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center bg-slate-800 rounded-xl p-1 gap-1">
-             <button onClick={() => setShowImportExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase text-slate-300 hover:bg-slate-700 transition-all"><Upload className="w-4 h-4"/> Sincronizar / CSV</button>
-             <button onClick={() => { syncWithCloud(); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'success' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}>{syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'success' ? <ShieldCheck className="w-4 h-4"/> : <Cloud className="w-4 h-4"/>} {syncStatus === 'syncing' ? 'Salvando...' : syncStatus === 'success' ? 'Conectado' : 'Nuvem'}</button>
-             {/* BOTÃO DO GITHUB - CLIQUE AQUI NO PC B */}
-             <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400" title="Configurações de Sincronização entre Computadores"><Github className="w-4 h-4"/></button>
+             <button onClick={() => setShowImportExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase text-slate-300 hover:bg-slate-700 transition-all"><Upload className="w-4 h-4"/> CSV / Arquivo</button>
+             <button 
+               onClick={() => { saveToSupabase(); }} 
+               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'connected' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}
+             >
+               {syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'connected' ? <Wifi className="w-4 h-4"/> : <WifiOff className="w-4 h-4"/>} 
+               {syncStatus === 'syncing' ? 'Salvando...' : syncStatus === 'connected' ? 'Ao Vivo' : 'Supabase'}
+             </button>
+             <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400" title="Configurações de Sincronização em Tempo Real">
+               <Database className="w-4 h-4"/>
+             </button>
           </div>
           <button onClick={() => setShowReport(true)} className="bg-green-600 hover:bg-green-500 px-5 py-3 rounded-xl text-xs font-black uppercase flex items-center gap-3 transition-all active:scale-95 shadow-xl"><LayoutDashboard className="w-4 h-4"/> Dashboards</button>
         </div>
@@ -819,38 +891,49 @@ const App: React.FC = () => {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[600] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowCloudConfig(false)}>
             <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-lg rounded-[2.5rem] overflow-hidden shadow-4xl" onClick={e => e.stopPropagation()}>
               <header className="p-8 bg-slate-900 text-white flex justify-between items-center">
-                <div className="flex items-center gap-4"><Github className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Vincular Dispositivos</h2></div>
+                <div className="flex items-center gap-4"><Database className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Sincronização Realtime</h2></div>
                 <button onClick={() => setShowCloudConfig(false)} className="p-2 hover:bg-white/10 rounded-full transition-all"><X/></button>
               </header>
               <div className="p-10 space-y-8">
                 {/* SEÇÃO PC A (ORIGEM) */}
                 <div className="p-6 bg-slate-50 border rounded-2xl space-y-4 border-slate-200">
-                  <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Passo 1: PC A (Origem dos Dados)</p>
-                  <p className="text-[10px] text-slate-500 font-bold">Clique no botão abaixo para gerar a sua chave e leve-a para o outro computador.</p>
-                  <button onClick={copyIdentity} className="w-full bg-slate-900 text-white p-4 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
-                    <Copy className="w-4 h-4 text-green-400"/> Copiar Minha Chave de Acesso
-                  </button>
+                  <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Seu ID de Sincronização</p>
+                  <div className="flex flex-col gap-3">
+                    <div className="p-4 bg-white border border-slate-200 rounded-xl flex items-center justify-between">
+                      <code className="text-sm font-black text-slate-900 tracking-widest">{syncId}</code>
+                      <div className={`w-3 h-3 rounded-full ${syncStatus === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
+                    </div>
+                    <button onClick={copySyncId} className="w-full bg-slate-900 text-white p-4 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
+                      <Copy className="w-4 h-4 text-green-400"/> Copiar ID para outro PC
+                    </button>
+                  </div>
                 </div>
 
                 {/* SEÇÃO PC B (DESTINO) */}
                 <div className="p-6 bg-slate-50 border rounded-2xl space-y-4 border-slate-200">
-                  <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Passo 2: PC B (Destino/Novo PC)</p>
-                  <p className="text-[10px] text-slate-500 font-bold">Cole a chave copiada do PC A no campo abaixo e clique em 'Vincular'.</p>
+                  <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Vincular Novo Dispositivo</p>
+                  <p className="text-[10px] text-slate-500 font-bold">Cole o ID de outro computador para espelhar os dados instantaneamente.</p>
                   <div className="flex gap-2">
-                    <input type="text" value={identityInput} onChange={e => setIdentityInput(e.target.value)} placeholder="Cole o código aqui..." className="flex-1 p-4 border rounded-xl text-xs font-bold outline-none bg-white border-slate-300 focus:border-green-500" />
-                    <button onClick={importIdentity} className="bg-green-600 text-white px-6 rounded-xl text-[10px] font-black uppercase hover:bg-green-500 shadow-lg shadow-green-500/20">Vincular</button>
+                    <input 
+                      type="text" 
+                      value={identityInput} 
+                      onChange={e => setIdentityInput(e.target.value)} 
+                      placeholder="Ex: DPE-A1B2C3D4" 
+                      className="flex-1 p-4 border rounded-xl text-xs font-bold outline-none bg-white border-slate-300 focus:border-green-500 uppercase" 
+                    />
+                    <button onClick={handleLinkSyncId} className="bg-green-600 text-white px-6 rounded-xl text-[10px] font-black uppercase hover:bg-green-500 shadow-lg shadow-green-500/20">Vincular</button>
                   </div>
                 </div>
 
-                {/* MANUAL E DOWNLOAD */}
-                <div className="border-t pt-6 space-y-4">
-                  <p className="text-[10px] font-black uppercase text-slate-400">Configurações Avançadas</p>
-                  <input type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} placeholder="Personal Access Token (ghp_...)" className="w-full p-4 border rounded-xl text-xs font-bold bg-white" />
-                  <div className="flex gap-2">
-                    <button onClick={saveGithubConfig} className="flex-1 bg-slate-100 text-slate-700 p-4 rounded-xl text-[10px] font-black uppercase hover:bg-slate-200">Salvar Token Manual</button>
-                    <button onClick={() => loadFromCloud()} className="bg-blue-600 text-white px-6 rounded-xl hover:bg-blue-500 transition-all" title="Forçar Download da Nuvem">
-                      <RefreshCw className={`w-4 h-4 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`}/>
-                    </button>
+                {/* INFO STATUS */}
+                <div className="pt-4 flex items-center justify-between text-[10px] font-black uppercase text-slate-400">
+                  <div className="flex items-center gap-2">
+                    <Database className="w-3 h-3"/>
+                    Supabase Realtime Cloud
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className={`w-3 h-3 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`}/>
+                    {syncStatus === 'syncing' ? 'Sincronizando...' : syncStatus === 'connected' ? 'Conectado' : 'Aguardando'}
                   </div>
                 </div>
               </div>
@@ -895,7 +978,7 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* IA Section - Inserida no local estratégico sem mudar o visual do resto */}
+                  {/* IA Section */}
                   <div className="bg-slate-900 rounded-[3rem] p-10 text-white relative overflow-hidden group shadow-2xl">
                     <div className="absolute top-0 right-0 p-10 opacity-10 group-hover:opacity-20 transition-all pointer-events-none">
                       <BrainCircuit className="w-56 h-56"/>
