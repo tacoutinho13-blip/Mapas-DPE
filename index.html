@@ -37,24 +37,34 @@
     @media print {
       @page {
         size: A4;
-        margin: 1cm;
+        margin: 0;
       }
       body {
         background-color: white !important;
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
+        overflow: visible !important;
+      }
+      /* Esconde tudo que não for o relatório */
+      body > div:not(#root),
+      #root > div > header,
+      #root > div > main {
+        display: none !important;
       }
       .no-print {
         display: none !important;
       }
+      /* Garante que o modal de relatório ocupe a página toda e seja visível */
       .print-expand {
-        position: absolute !important;
-        top: 0 !important;
-        left: 0 !important;
+        position: relative !important;
+        display: block !important;
         width: 100% !important;
         height: auto !important;
-        overflow: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        box-shadow: none !important;
         background: white !important;
+        z-index: 9999 !important;
       }
       .print-shadow-none {
         box-shadow: none !important;
@@ -62,6 +72,11 @@
       }
       .break-inside-avoid {
         break-inside: avoid;
+        page-break-inside: avoid;
+      }
+      /* Força a cor preta no texto para melhor legibilidade no papel */
+      h1, h2, h3, h4, p, span, td, th {
+        color: black !important;
       }
     }
   </style>

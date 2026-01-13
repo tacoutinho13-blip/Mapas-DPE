@@ -51,7 +51,10 @@ import {
   Database,
   Link as LinkIcon,
   Wifi,
-  WifiOff
+  WifiOff,
+  Share2,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { geoIdentity, geoPath } from 'd3-geo';
@@ -163,8 +166,9 @@ const App: React.FC = () => {
   const [showLayers, setShowLayers] = useState(false);
   const tooltipTimerRef = useRef<number | null>(null);
   
-  // Supabase states
+  // Supabase & Access states
   const [syncId, setSyncId] = useState<string>(localStorage.getItem('supabase_sync_id') || "");
+  const [isReadOnly, setIsReadOnly] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error' | 'connected'>('idle');
   const [showCloudConfig, setShowCloudConfig] = useState(false);
   const [identityInput, setIdentityInput] = useState("");
@@ -245,7 +249,7 @@ const App: React.FC = () => {
 
   // --- Supabase Synchronization Functions ---
   const saveToSupabase = async (dataOverride?: { userStats: any, markerLibrary: any }) => {
-    if (!syncId) return;
+    if (!syncId || isReadOnly) return;
     setSyncStatus('syncing');
     const dataToSync = dataOverride || { userStats, markerLibrary };
     try {
@@ -283,7 +287,6 @@ const App: React.FC = () => {
         setUserStats(data.content.userStats || {});
         setMarkerLibrary(data.content.markerLibrary || []);
         setSyncStatus('connected');
-        // Pequeno delay para garantir que o efeito de salvamento não dispare imediatamente ao carregar
         setTimeout(() => { isInitialLoad.current = false; }, 800);
         return true;
       } else {
@@ -305,7 +308,7 @@ const App: React.FC = () => {
       .on(
         'postgres_changes',
         {
-          event: '*', // Escuta QUALQUER mudança (INSERT, UPDATE, DELETE)
+          event: '*', 
           schema: 'public',
           table: 'sync_data',
           filter: `id=eq.${id}`
@@ -313,8 +316,6 @@ const App: React.FC = () => {
         (payload) => {
           if (payload.new && payload.new.content) {
             const newContent = payload.new.content;
-            
-            // Só atualiza se for realmente diferente para evitar loops infinitos
             isInitialLoad.current = true;
             setUserStats(newContent.userStats || {});
             setMarkerLibrary(newContent.markerLibrary || []);
@@ -333,6 +334,7 @@ const App: React.FC = () => {
     if (!identityInput.trim()) return;
     const newId = identityInput.trim().toUpperCase();
     setSyncId(newId);
+    setIsReadOnly(false); 
     localStorage.setItem('supabase_sync_id', newId);
     setIdentityInput("");
     await loadFromSupabase(newId);
@@ -343,7 +345,14 @@ const App: React.FC = () => {
   const copySyncId = () => {
     if (!syncId) return;
     navigator.clipboard.writeText(syncId);
-    alert("ID DE SINCRONIZAÇÃO COPIADO!\nCole no outro computador para espelhar os dados.");
+    alert("ID DE ADMINISTRAÇÃO COPIADO!\nUse para editar em outros computadores.");
+  };
+
+  const generateViewLink = () => {
+    if (!syncId) return;
+    const viewUrl = `${window.location.origin}${window.location.pathname}?view=${syncId}`;
+    navigator.clipboard.writeText(viewUrl);
+    alert("LINK DE CONSULTA COPIADO!\nQuem possuir este link poderá ver os dados em tempo real, mas não poderá alterar nada.");
   };
 
   // Bootstrap
@@ -351,7 +360,6 @@ const App: React.FC = () => {
     const bootstrap = async () => {
       setIsLoadingMap(true);
       try {
-        // Carrega nomes e GeoJSON
         const [nRes, gRes] = await Promise.all([fetch(AM_NAMES_URL), fetch(AM_GEOJSON_URL)]);
         if (nRes.ok) {
           const namesJson = await nRes.json();
@@ -361,15 +369,20 @@ const App: React.FC = () => {
         }
         if (gRes.ok) setGeoData(await gRes.json());
         
-        // Verifica Sync ID
-        let currentSyncId = localStorage.getItem('supabase_sync_id');
-        if (!currentSyncId) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const viewId = urlParams.get('view');
+        
+        let currentSyncId = viewId || localStorage.getItem('supabase_sync_id');
+        
+        if (viewId) {
+          setIsReadOnly(true);
+          setSyncId(viewId);
+        } else if (!currentSyncId) {
           currentSyncId = generateSyncId();
           setSyncId(currentSyncId);
           localStorage.setItem('supabase_sync_id', currentSyncId);
         }
 
-        // Tenta carregar da nuvem primeiro, senão usa local
         const hasCloudData = await loadFromSupabase(currentSyncId);
         if (!hasCloudData) {
           const saved = localStorage.getItem(STORAGE_KEY);
@@ -395,19 +408,17 @@ const App: React.FC = () => {
 
   // AUTOMATIC SAVE EFFECT
   useEffect(() => {
-    if (isInitialLoad.current) return;
+    if (isInitialLoad.current || isReadOnly) return;
     
-    // Salva local para backup imediato
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ userStats, markerLibrary }));
 
-    // Debounce mais curto (500ms) para sensação de instantaneidade
     if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
     syncTimeoutRef.current = setTimeout(() => {
       saveToSupabase();
     }, 500);
 
     return () => { if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current); };
-  }, [userStats, markerLibrary, syncId]);
+  }, [userStats, markerLibrary, syncId, isReadOnly]);
 
   // --- Handlers ---
   const onMouseDown = (e: React.MouseEvent) => { if (e.button !== 0) return; isDraggingMap.current = true; mapHasMoved.current = false; lastMousePos.current = { x: e.clientX, y: e.clientY }; };
@@ -441,6 +452,7 @@ const App: React.FC = () => {
   const hideTooltip = () => { if (tooltipTimerRef.current) window.clearTimeout(tooltipTimerRef.current); setMapTooltip(null); };
 
   const updateMunicipality = (id: string, update: Partial<MunicipalityData>) => {
+    if (isReadOnly) return;
     setUserStats(prev => {
       const current = prev[id] || { id, name: namesMap[id], visits: [], scheduledTrips: [], customMarkers: [] };
       return { ...prev, [id]: { ...current, ...update } };
@@ -448,7 +460,7 @@ const App: React.FC = () => {
   };
 
   const saveVisit = () => {
-    if (!selectedId) return;
+    if (!selectedId || isReadOnly) return;
     const newVisit: VisitRecord = { title: visitTitle, startDate: visitStart, endDate: visitEnd, purpose: 'trabalho', attendanceCount: visitAttendance, observations: visitObs };
     let visits = [...(userStats[selectedId]?.visits || [])];
     if (editingVisitIdx !== null) { visits[editingVisitIdx] = newVisit; setEditingVisitIdx(null); }
@@ -459,7 +471,7 @@ const App: React.FC = () => {
   };
 
   const saveSchedule = () => {
-    if (!selectedId) return;
+    if (!selectedId || isReadOnly) return;
     const newTrip: ScheduledTrip = { title: scheduleTitle, startDate: scheduleStart, endDate: scheduleEnd, observations: scheduleObs };
     let scheduledTrips = [...(userStats[selectedId]?.scheduledTrips || [])];
     if (editingScheduleIdx !== null) { scheduledTrips[editingScheduleIdx] = newTrip; setEditingScheduleIdx(null); }
@@ -469,29 +481,32 @@ const App: React.FC = () => {
   };
 
   const startEditVisit = (idx: number) => {
+    if (isReadOnly) return;
     const v = userStats[selectedId!]!.visits[idx];
     setVisitTitle(v.title); setVisitStart(v.startDate); setVisitEnd(v.endDate); setVisitAttendance(v.attendanceCount || 0); setVisitObs(v.observations || "");
     setEditingVisitIdx(idx);
   };
 
   const startEditSchedule = (idx: number) => {
+    if (isReadOnly) return;
     const s = userStats[selectedId!]!.scheduledTrips[idx];
     setScheduleTitle(s.title); setScheduleStart(s.startDate); setScheduleEnd(s.endDate); setScheduleObs(s.observations || "");
     setEditingScheduleIdx(idx);
   };
 
   const saveToMarkerLibrary = () => {
-    if (!markerLabel.trim()) return;
+    if (!markerLabel.trim() || isReadOnly) return;
     const newMarker = { label: markerLabel, color: markerColor, id: Date.now().toString() };
     setMarkerLibrary(prev => [newMarker, ...prev]);
   };
 
   const removeFromMarkerLibrary = (id: string) => {
+    if (isReadOnly) return;
     setMarkerLibrary(prev => prev.filter(m => m.id !== id));
   };
 
   const addMarker = (labelOverride?: string, colorOverride?: string) => {
-    if (!selectedId) return;
+    if (!selectedId || isReadOnly) return;
     const label = labelOverride || markerLabel, color = colorOverride || markerColor;
     if (!label.trim()) return;
     const customMarkers = [{ label, color, id: Date.now().toString() }, ...(userStats[selectedId]?.customMarkers || [])];
@@ -500,6 +515,7 @@ const App: React.FC = () => {
   };
 
   const deleteSubItem = (cityId: string, type: 'visits' | 'scheduledTrips' | 'customMarkers', index: number) => {
+    if (isReadOnly) return;
     const list = [...(userStats[cityId][type] || [])];
     list.splice(index, 1);
     updateMunicipality(cityId, { [type]: list });
@@ -518,90 +534,121 @@ const App: React.FC = () => {
     });
   };
 
-  // --- Módulo de Importação/Exportação ---
-  const downloadTemplate = () => {
-    const csvContent = "Município,Título,Início (AAAA-MM-DD),Fim (AAAA-MM-DD),Tipo (Realizada ou Planejada),Assistidos,Observações\nManaus,Missão de Teste,2024-01-01,2024-01-05,Realizada,150,Observação teste aqui\nParintins,Ação Futura,2024-12-25,2024-12-30,Planejada,0,Exemplo de agendamento";
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute("download", "modelo_importacao_itinerante.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const exportDataCSV = () => {
-    const allEntries: any[] = [];
-    (Object.values(userStats) as MunicipalityData[]).forEach(m => {
-      m.visits.forEach(v => allEntries.push({ Município: m.name, Tipo: 'Realizada', Título: v.title, Início: v.startDate, Fim: v.endDate, Assistidos: v.attendanceCount, Observações: v.observations }));
-      m.scheduledTrips.forEach(s => allEntries.push({ Município: m.name, Tipo: 'Planejada', Título: s.title, Início: s.startDate, Fim: s.endDate, Assistidos: 0, Observações: s.observations }));
-    });
-    
-    if (allEntries.length === 0) {
-      alert("Nenhum dado para exportar.");
-      return;
-    }
-
-    const csv = Papa.unparse(allEntries);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute("download", `dados_itinerante_am_${new Date().toISOString().split('T')[0]}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || isReadOnly) return;
 
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
       complete: (results) => {
         const data = results.data as any[];
-        let importedCount = 0;
-        let errors = 0;
-
         const newUserStats = { ...userStats };
-        const normalizedNamesMap: Record<string, string> = {};
-        Object.entries(namesMap).forEach(([id, name]) => {
-          normalizedNamesMap[normalize(name)] = id;
-        });
+        
+        data.forEach((row: any) => {
+          const cityName = row.municipio || row.Municipio || row.name;
+          if (!cityName) return;
 
-        data.forEach(row => {
-          const rawCityName = row['Município'] || "";
-          const cityId = normalizedNamesMap[normalize(rawCityName)];
+          const cityId = Object.keys(namesMap).find(id => 
+            normalize(namesMap[id]) === normalize(cityName)
+          );
 
           if (cityId) {
-            const type = (row['Tipo (Realizada ou Planejada)'] || row['Tipo'] || "").toLowerCase();
-            const title = row['Título'] || "Sem Título";
-            const start = row['Início (AAAA-MM-DD)'] || row['Início'] || new Date().toISOString().split('T')[0];
-            const end = row['Fim (AAAA-MM-DD)'] || row['Fim'] || start;
-            const obs = row['Observações'] || "";
-            const count = parseInt(row['Assistidos']) || 0;
+            const current = newUserStats[cityId] || { 
+              id: cityId, 
+              name: namesMap[cityId], 
+              visits: [], 
+              scheduledTrips: [], 
+              customMarkers: [] 
+            };
 
-            if (!newUserStats[cityId]) {
-              newUserStats[cityId] = { id: cityId, name: namesMap[cityId], visits: [], scheduledTrips: [], customMarkers: [] };
+            const type = (row.tipo || row.type || "").toLowerCase();
+            if (type.includes('visit') || type.includes('concluid') || type.includes('registro')) {
+              current.visits = [{
+                title: row.titulo || row.title || "Importado",
+                startDate: row.inicio || row.startDate || new Date().toISOString().split('T')[0],
+                endDate: row.fim || row.endDate || new Date().toISOString().split('T')[0],
+                purpose: 'trabalho',
+                attendanceCount: parseInt(row.assistidos || row.attendees || "0"),
+                observations: row.obs || row.observations || ""
+              }, ...current.visits];
+              current.visits.sort((a,b) => b.startDate.localeCompare(a.startDate));
+            } else if (type.includes('sched') || type.includes('plan') || type.includes('agend')) {
+              current.scheduledTrips = [{
+                title: row.titulo || row.title || "Planejado",
+                startDate: row.inicio || row.startDate || "",
+                endDate: row.fim || row.endDate || "",
+                observations: row.obs || row.observations || ""
+              }, ...current.scheduledTrips];
             }
-
-            if (type.includes("realizada")) {
-              newUserStats[cityId].visits.push({ title, startDate: start, endDate: end, purpose: 'trabalho', attendanceCount: count, observations: obs });
-            } else if (type.includes("planejada")) {
-              newUserStats[cityId].scheduledTrips.push({ title, startDate: start, endDate: end, observations: obs });
-            }
-            importedCount++;
-          } else {
-            errors++;
+            newUserStats[cityId] = current;
           }
         });
 
         setUserStats(newUserStats);
-        alert(`Importação concluída!\nRegistros salvos: ${importedCount}\nMunicípios não reconhecidos: ${errors}`);
+        alert("Dados processados com sucesso!");
         setShowImportExport(false);
+      },
+      error: (error) => {
+        alert("Erro ao ler CSV: " + error.message);
       }
     });
+  };
+
+  const exportDataCSV = () => {
+    const rows: any[] = [];
+    Object.values(userStats).forEach((city) => {
+      city.visits.forEach(v => {
+        rows.push({
+          municipio: city.name,
+          tipo: 'Concluido',
+          titulo: v.title,
+          inicio: v.startDate,
+          fim: v.endDate,
+          assistidos: v.attendanceCount,
+          obs: v.observations
+        });
+      });
+      city.scheduledTrips.forEach(s => {
+        rows.push({
+          municipio: city.name,
+          tipo: 'Planejado',
+          titulo: s.title,
+          inicio: s.startDate,
+          fim: s.endDate,
+          assistidos: 0,
+          obs: s.observations
+        });
+      });
+    });
+
+    const csv = Papa.unparse(rows);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `dpe_am_itinerante_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const downloadTemplate = () => {
+    const template = [
+      { municipio: 'Manaus', tipo: 'Concluido', titulo: 'Missão Exemplo', inicio: '2024-01-01', fim: '2024-01-05', assistidos: 150, obs: 'Exemplo de observação' },
+      { municipio: 'Parintins', tipo: 'Planejado', titulo: 'Ação Futura', inicio: '2025-05-10', fim: '2025-05-15', assistidos: 0, obs: 'Planejamento inicial' }
+    ];
+    const csv = Papa.unparse(template);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", "modelo_importacao_itinerante.csv");
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const projection = useMemo(() => geoData ? geoIdentity().reflectY(true).fitExtent([[50, 50], [mapWidth - 50, mapHeight - 70]], geoData) : null, [geoData]);
@@ -644,32 +691,32 @@ const App: React.FC = () => {
 
   return (
     <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
-      <header className="bg-slate-900 border-b-4 border-green-500 px-6 py-4 flex items-center justify-between shadow-2xl text-white shrink-0 no-print">
+      <header className={`bg-slate-900 border-b-4 ${isReadOnly ? 'border-blue-500' : 'border-green-500'} px-6 py-4 flex items-center justify-between shadow-2xl text-white shrink-0 no-print`}>
         <div className="flex items-center gap-4">
-          <div className="bg-green-600 p-2 rounded-xl"><Target className="w-6 h-6" /></div>
-          <div><h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1><p className="text-[9px] font-bold text-green-400 tracking-[0.3em] uppercase opacity-80">Gestão Regional Amazonas</p></div>
+          <div className={`${isReadOnly ? 'bg-blue-600' : 'bg-green-600'} p-2 rounded-xl`}><Target className="w-6 h-6" /></div>
+          <div><h1 className="text-xl font-black uppercase tracking-tighter">Defensoria Itinerante</h1><p className={`text-[9px] font-bold ${isReadOnly ? 'text-blue-400' : 'text-green-400'} tracking-[0.3em] uppercase opacity-80`}>Gestão Regional Amazonas</p></div>
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center bg-slate-800 rounded-xl p-1 gap-1">
-             <button onClick={() => setShowImportExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase text-slate-300 hover:bg-slate-700 transition-all"><Upload className="w-4 h-4"/> CSV / Arquivo</button>
+             {!isReadOnly && <button onClick={() => setShowImportExport(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase text-slate-300 hover:bg-slate-700 transition-all"><Upload className="w-4 h-4"/> CSV / Arquivo</button>}
              <button 
-               onClick={() => { saveToSupabase(); }} 
-               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'connected' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}
+               onClick={() => { if (!isReadOnly) saveToSupabase(); }} 
+               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${isReadOnly ? 'bg-blue-900/50 text-blue-300' : syncStatus === 'syncing' ? 'bg-yellow-600 text-white animate-pulse' : syncStatus === 'error' ? 'bg-red-600 text-white' : syncStatus === 'connected' ? 'bg-green-600 text-white' : 'hover:bg-slate-700 text-slate-300'}`}
              >
-               {syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'connected' ? <Wifi className="w-4 h-4"/> : <WifiOff className="w-4 h-4"/>} 
-               {syncStatus === 'syncing' ? 'Sincronizando...' : syncStatus === 'connected' ? 'Ao Vivo' : 'Offline'}
+               {isReadOnly ? <Lock className="w-4 h-4"/> : syncStatus === 'syncing' ? <RefreshCw className="w-4 h-4 animate-spin"/> : syncStatus === 'connected' ? <Wifi className="w-4 h-4"/> : <WifiOff className="w-4 h-4"/>} 
+               {isReadOnly ? 'Apenas Consulta' : syncStatus === 'syncing' ? 'Sincronizando...' : syncStatus === 'connected' ? 'Ao Vivo' : 'Offline'}
              </button>
-             <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400" title="Configurações de Sincronização em Tempo Real">
+             <button onClick={() => setShowCloudConfig(true)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400" title="Configurações de Acesso">
                <Database className="w-4 h-4"/>
              </button>
           </div>
-          <button onClick={() => setShowReport(true)} className="bg-green-600 hover:bg-green-500 px-5 py-3 rounded-xl text-xs font-black uppercase flex items-center gap-3 transition-all active:scale-95 shadow-xl"><LayoutDashboard className="w-4 h-4"/> Dashboards</button>
+          <button onClick={() => setShowReport(true)} className={`${isReadOnly ? 'bg-blue-600 hover:bg-blue-500' : 'bg-green-600 hover:bg-green-500'} px-5 py-3 rounded-xl text-xs font-black uppercase flex items-center gap-3 transition-all active:scale-95 shadow-xl`}><LayoutDashboard className="w-4 h-4"/> Dashboards</button>
         </div>
       </header>
 
       <main className="flex-1 grid grid-cols-1 md:grid-cols-12 overflow-hidden relative no-print">
         <section className={`relative flex flex-col bg-white overflow-hidden ${selectedId ? 'md:col-span-7 lg:col-span-8' : 'md:col-span-12'}`} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onWheel={handleWheel}>
-          <div className="absolute top-8 left-8 z-[90] w-80"><div className="flex items-center bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden px-5 focus-within:border-green-500 transition-all"><Search className="w-5 h-5 text-slate-400" /><input type="text" value={searchQuery} onFocus={() => setShowSearchList(true)} onChange={e => setSearchQuery(e.target.value)} placeholder="Pesquisar Município..." className="w-full py-4 px-3 text-xs font-bold outline-none" /></div>{showSearchList && <motion.div className="mt-2 bg-white rounded-2xl shadow-4xl border border-slate-100 max-h-72 overflow-y-auto p-3 space-y-1">{(Object.entries(namesMap) as [string, string][]).filter(([_, n]) => n.toLowerCase().includes(searchQuery.toLowerCase())).map(([id, n]) => (<button key={id} onClick={() => focusCity(id)} className="w-full text-left p-4 hover:bg-green-600 hover:text-white rounded-xl text-[11px] font-black uppercase text-slate-700 transition-all">{n}</button>))}</motion.div>}</div>
+          <div className="absolute top-8 left-8 z-[90] w-80"><div className="flex items-center bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden px-5 focus-within:border-green-500 transition-all"><Search className="w-5 h-5 text-slate-400" /><input type="text" value={searchQuery} onFocus={() => setShowSearchList(true)} onChange={e => setSearchQuery(e.target.value)} placeholder="Pesquisar Município..." className="w-full py-4 px-3 text-xs font-bold outline-none" /></div>{showSearchList && <motion.div className="mt-2 bg-white rounded-2xl shadow-4xl border border-slate-100 max-h-72 overflow-y-auto p-3 space-y-1">{(Object.entries(namesMap) as [string, string][]).filter(([_, n]) => n.toLowerCase().includes(searchQuery.toLowerCase())).map(([id, n]) => (<button key={id} onClick={() => focusCity(id)} className={`w-full text-left p-4 ${isReadOnly ? 'hover:bg-blue-600' : 'hover:bg-green-600'} hover:text-white rounded-xl text-[11px] font-black uppercase text-slate-700 transition-all`}>{n}</button>))}</motion.div>}</div>
           
           <div className="absolute bottom-8 right-8 z-[90] bg-white/90 backdrop-blur p-4 rounded-2xl shadow-2xl border border-slate-200 flex flex-col gap-2 items-center">
             <p className="text-[8px] font-black uppercase text-slate-400 tracking-widest">Missões Concluídas</p>
@@ -723,7 +770,7 @@ const App: React.FC = () => {
           )}</AnimatePresence>
 
           <div className="absolute bottom-10 left-8 z-[90] flex flex-col gap-2"><button onClick={() => handleZoomButtons('in')} className="p-4 bg-white border border-slate-200 rounded-2xl shadow-2xl hover:bg-slate-50 text-slate-900"><Plus className="w-5 h-5"/></button><button onClick={() => handleZoomButtons('out')} className="p-4 bg-white border border-slate-200 rounded-2xl shadow-2xl hover:bg-slate-50 text-slate-900"><Minus className="w-5 h-5"/></button><button onClick={resetZoom} className="p-4 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl hover:bg-slate-800 text-white mt-2"><Maximize className="w-5 h-5"/></button></div>
-          <div className="flex-1 relative overflow-hidden bg-slate-50">{isLoadingMap ? <div className="absolute inset-0 flex items-center justify-center"><Loader2 className="animate-spin text-green-600 w-12 h-12" /></div> : (<div className="w-full h-full flex items-center justify-center"><svg viewBox={`0 0 ${mapWidth} ${mapHeight}`} className="w-full h-full select-none" style={{ overflow: 'visible' }}><g transform={`translate(${viewBoxTransform.x}, ${viewBoxTransform.y}) scale(${viewBoxTransform.k})`}>{geoData.features.map((f: any) => { const id = getFeatureId(f); const mData = userStats[id]; const visitsCount = mData?.visits.length || 0; let fillColor = visitsCount > 0 ? COLOR_SCALE[Math.min(visitsCount, 5)] : (selectedId === id ? "#f1f5f9" : "#fff"); if (id === MANAUS_ID) fillColor = "#2563eb"; return (<path key={`poly-${id}`} d={pathGenerator!(f)!} fill={fillColor} stroke={selectedId === id ? "#16a34a" : "#e2e8f0"} strokeWidth={selectedId === id ? 1.8 : 0.8} onClick={() => !mapHasMoved.current && setSelectedId(id)} onMouseEnter={(e) => { 
+          <div className="flex-1 relative overflow-hidden bg-slate-50">{isLoadingMap ? <div className="absolute inset-0 flex items-center justify-center"><Loader2 className="animate-spin text-green-600 w-12 h-12" /></div> : (<div className="w-full h-full flex items-center justify-center"><svg viewBox={`0 0 ${mapWidth} ${mapHeight}`} className="w-full h-full select-none" style={{ overflow: 'visible' }}><g transform={`translate(${viewBoxTransform.x}, ${viewBoxTransform.y}) scale(${viewBoxTransform.k})`}>{geoData.features.map((f: any) => { const id = getFeatureId(f); const mData = userStats[id]; const visitsCount = mData?.visits.length || 0; let fillColor = visitsCount > 0 ? COLOR_SCALE[Math.min(visitsCount, 5)] : (selectedId === id ? "#f1f5f9" : "#fff"); if (id === MANAUS_ID) fillColor = "#2563eb"; return (<path key={`poly-${id}`} d={pathGenerator!(f)!} fill={fillColor} stroke={selectedId === id ? (isReadOnly ? "#2563eb" : "#16a34a") : "#e2e8f0"} strokeWidth={selectedId === id ? 1.8 : 0.8} onClick={() => !mapHasMoved.current && setSelectedId(id)} onMouseEnter={(e) => { 
                     if (isDraggingMap.current) return; 
                     showTooltip({ 
                       x: e.clientX, 
@@ -740,7 +787,7 @@ const App: React.FC = () => {
                     if (isNaN(centroid[0])) return null;
                     const normalizedName = normalize(namesMap[id] || "");
                     let dx = 0, dy = 0;
-                    if (["SILVES", "BARREIRINHA", "MANAQUIRI", "TAPAUA", "COARI", "NOVO AIRAO"].includes(normalizedName)) dy = 6;
+                    if (["SILVES", "BARREIRINHA", "MANAQUIRI", "TAPAUA", "COARI", "NOVO AIRAO", "JAPURA", "TONANTINS"].includes(normalizedName)) dy = 9;
                     if (["NOVO AIRAO", "BORBA", "MANICORE", "PARINTINS", "MARAA", "FONTE BOA", "SANTA ISABEL DO RIO NEGRO"].includes(normalizedName)) dx = 5;
                     if (normalizedName === "MANAUS") dy = 9;
                     return (<text key={`text-${id}`} transform={`translate(${centroid[0] + dx}, ${centroid[1] + dy})`} fontSize={5.5} textAnchor="middle" pointerEvents="none" className={`font-black uppercase tracking-tight select-none ${id === MANAUS_ID ? 'fill-white' : 'fill-slate-900 opacity-60'}`}>{namesMap[id]}</text>);
@@ -751,11 +798,11 @@ const App: React.FC = () => {
                     if (isNaN(centroid[0]) || !d) return null; 
                     const normalizedName = normalize(namesMap[id] || "");
                     let nameDx = 0, nameDy = 0;
-                    if (["SILVES", "BARREIRINHA", "MANAQUIRI", "TAPAUA", "COARI", "NOVO AIRAO"].includes(normalizedName)) nameDy = 6;
+                    if (["SILVES", "BARREIRINHA", "MANAQUIRI", "TAPAUA", "COARI", "NOVO AIRAO", "JAPURA", "TONANTINS"].includes(normalizedName)) nameDy = 9;
                     if (["NOVO AIRAO", "BORBA", "MANICORE", "PARINTINS", "MARAA", "FONTE BOA", "SANTA ISABEL DO RIO NEGRO"].includes(normalizedName)) nameDx = 5;
                     if (normalizedName === "MANAUS") nameDy = 9;
                     let iconDy = 0;
-                    if (["SILVES", "CAREIRO", "MANAQUIRI", "MANACAPURU", "AUTAZES", "NOVA OLINDA DO NORTE", "ANORI", "ALVARES", "ALVARAES", "ITACOATIARA"].includes(normalizedName)) iconDy = 8;
+                    if (["SILVES", "CAREIRO", "MANAQUIRI", "MANACAPURU", "AUTAZES", "NOVA OLINDA DO NORTE", "ANORI", "ALVARES", "ALVARAES", "ITACOATIARA", "BARREIRINHA", "NOVO AIRAO", "JAPURA", "TONANTINS"].includes(normalizedName)) iconDy = 8;
                     const filteredMarkers = (d.customMarkers || []).filter(m => {
                       if (!layersVisibility.markers) return false;
                       if (layersVisibility.visibleFavoriteLabels.length > 0) return layersVisibility.visibleFavoriteLabels.includes(m.label);
@@ -808,61 +855,64 @@ const App: React.FC = () => {
 
         <AnimatePresence>{selectedId && (
             <motion.aside initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} className="md:col-span-5 lg:col-span-4 bg-white border-l overflow-y-auto custom-scrollbar p-8 lg:p-12 space-y-10 z-[110] shadow-2xl no-print">
-              <div className="flex justify-between items-start"><div><h2 className="text-4xl font-black uppercase tracking-tighter text-slate-900">{namesMap[selectedId]}</h2><p className="text-[10px] font-bold uppercase text-green-600 mt-2">Dossiê Estratégico</p></div><button onClick={() => { setSelectedId(null); }} className="p-4 bg-slate-100 rounded-2xl hover:bg-slate-200"><X /></button></div>
+              <div className="flex justify-between items-start"><div><h2 className="text-4xl font-black uppercase tracking-tighter text-slate-900">{namesMap[selectedId]}</h2><p className={`text-[10px] font-bold uppercase ${isReadOnly ? 'text-blue-600' : 'text-green-600'} mt-2`}>Dossiê Estratégico</p></div><button onClick={() => { setSelectedId(null); }} className="p-4 bg-slate-100 rounded-2xl hover:bg-slate-200"><X /></button></div>
               <div className="space-y-8">
                  {userStats[selectedId] ? (
                    <div className="space-y-10">
-                      {(userStats[selectedId].customMarkers?.length > 0) && (<div className="space-y-4"><p className="text-[9px] font-black text-orange-600 uppercase border-b pb-2 tracking-widest">Fixados</p>{userStats[selectedId].customMarkers.map((m, i) => (<div key={i} className="flex items-center justify-between p-4 border rounded-2xl bg-white"><div className="flex items-center gap-3"><div className="w-3 h-3 rounded-full" style={{backgroundColor: m.color}}/><span className="text-[11px] font-bold uppercase text-slate-700">{m.label}</span></div><button onClick={() => deleteSubItem(selectedId, 'customMarkers', i)} className="text-red-300 hover:text-red-500"><Trash2 className="w-4 h-4"/></button></div>))}</div>)}
+                      {(userStats[selectedId].customMarkers?.length > 0) && (<div className="space-y-4"><p className="text-[9px] font-black text-orange-600 uppercase border-b pb-2 tracking-widest">Fixados</p>{userStats[selectedId].customMarkers.map((m, i) => (<div key={i} className="flex items-center justify-between p-4 border rounded-2xl bg-white"><div className="flex items-center gap-3"><div className="w-3 h-3 rounded-full" style={{backgroundColor: m.color}}/><span className="text-[11px] font-bold uppercase text-slate-700">{m.label}</span></div>{!isReadOnly && <button onClick={() => deleteSubItem(selectedId, 'customMarkers', i)} className="text-red-300 hover:text-red-500"><Trash2 className="w-4 h-4"/></button>}</div>))}</div>)}
                       {userStats[selectedId].scheduledTrips?.length > 0 && (
                         <div className="space-y-4"><p className="text-[9px] font-black text-blue-600 uppercase border-b pb-2 tracking-widest">Programados</p>
-                           {userStats[selectedId].scheduledTrips.map((s, i) => (<div key={i} className={`p-6 rounded-[1.8rem] space-y-3 group border transition-all ${editingScheduleIdx === i ? 'bg-blue-50 border-blue-300' : 'bg-slate-50 border-slate-100'}`}><div className="flex justify-between items-start"><div><p className="text-xs font-black uppercase text-slate-800">{s.title}</p><p className="text-[9px] font-bold text-slate-500 uppercase mt-1">{s.startDate} até {s.endDate}</p></div><div className="flex gap-2"><button onClick={() => startEditSchedule(i)} className="text-blue-400 hover:text-blue-600"><Edit2 className="w-4 h-4"/></button><button onClick={() => deleteSubItem(selectedId, 'scheduledTrips', i)} className="text-red-300 hover:text-red-500"><Trash2 className="w-4 h-4"/></button></div></div>{s.observations && <p className="text-[10px] italic text-slate-500 bg-white/50 p-3 rounded-xl border border-blue-100/50">{s.observations}</p>}</div>))}
+                           {userStats[selectedId].scheduledTrips.map((s, i) => (<div key={i} className={`p-6 rounded-[1.8rem] space-y-3 group border transition-all ${editingScheduleIdx === i ? 'bg-blue-50 border-blue-300' : 'bg-slate-50 border-slate-100'}`}><div className="flex justify-between items-start"><div><p className="text-xs font-black uppercase text-slate-800">{s.title}</p><p className="text-[9px] font-bold text-slate-500 uppercase mt-1">{s.startDate} até {s.endDate}</p></div>{!isReadOnly && <div className="flex gap-2"><button onClick={() => startEditSchedule(i)} className="text-blue-400 hover:text-blue-600"><Edit2 className="w-4 h-4"/></button><button onClick={() => deleteSubItem(selectedId, 'scheduledTrips', i)} className="text-red-300 hover:text-red-500"><Trash2 className="w-4 h-4"/></button></div>}</div>{s.observations && <p className="text-[10px] italic text-slate-500 bg-white/50 p-3 rounded-xl border border-blue-100/50">{s.observations}</p>}</div>))}
                         </div>
                       )}
-                      {userStats[selectedId].visits?.length > 0 && (<div className="space-y-4"><p className="text-[9px] font-black text-green-600 uppercase border-b pb-2 tracking-widest">Concluídos</p>{userStats[selectedId].visits.map((v, i) => (<div key={i} className={`p-6 rounded-[1.8rem] space-y-3 group border transition-all ${editingVisitIdx === i ? 'bg-green-50 border-green-300' : 'bg-slate-50 border-slate-100'}`}><div className="flex justify-between items-start"><div><p className="text-xs font-black uppercase text-slate-800">{v.title}</p><p className="text-[9px] font-bold text-slate-500 uppercase mt-1">{v.startDate} até {v.endDate}</p></div><div className="flex gap-2"><button onClick={() => startEditVisit(i)} className="text-blue-400 hover:text-blue-600"><Edit2 className="w-4 h-4"/></button><button onClick={() => deleteSubItem(selectedId, 'visits', i)} className="text-red-300 hover:text-red-500"><Trash2 className="w-4 h-4"/></button></div></div>{v.observations && <p className="text-[10px] italic text-slate-500 bg-white/50 p-3 rounded-xl border border-green-100/50">{v.observations}</p>}<div className="flex gap-4 pt-2"><div className="flex items-center gap-1 text-green-600 font-bold text-[10px]"><Users className="w-3 h-3"/> {v.attendanceCount} Assistidos</div></div></div>))}</div>)}
+                      {userStats[selectedId].visits?.length > 0 && (<div className="space-y-4"><p className="text-[9px] font-black text-green-600 uppercase border-b pb-2 tracking-widest">Concluídos</p>{userStats[selectedId].visits.map((v, i) => (<div key={i} className={`p-6 rounded-[1.8rem] space-y-3 group border transition-all ${editingVisitIdx === i ? 'bg-green-50 border-green-300' : 'bg-slate-50 border-slate-100'}`}><div className="flex justify-between items-start"><div><p className="text-xs font-black uppercase text-slate-800">{v.title}</p><p className="text-[9px] font-bold text-slate-500 uppercase mt-1">{v.startDate} até {v.endDate}</p></div>{!isReadOnly && <div className="flex gap-2"><button onClick={() => startEditVisit(i)} className="text-blue-400 hover:text-blue-600"><Edit2 className="w-4 h-4"/></button><button onClick={() => deleteSubItem(selectedId, 'visits', i)} className="text-red-300 hover:text-red-500"><Trash2 className="w-4 h-4"/></button></div>}</div>{v.observations && <p className="text-[10px] italic text-slate-500 bg-white/50 p-3 rounded-xl border border-green-100/50">{v.observations}</p>}<div className="flex gap-4 pt-2"><div className="flex items-center gap-1 text-green-600 font-bold text-[10px]"><Users className="w-3 h-3"/> {v.attendanceCount} Assistidos</div></div></div>))}</div>)}
                    </div>
                  ) : <div className="text-center py-16 border-2 border-dashed rounded-[2.5rem] bg-slate-50"><p className="text-[10px] font-black uppercase text-slate-400">Sem registros</p></div>}
               </div>
-              <div className="space-y-10 pt-10 border-t">
-                <div className="bg-blue-50/50 p-8 rounded-[2.5rem] space-y-6 border border-blue-100"><h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-blue-800"><Calendar className="w-5 h-5 text-blue-600"/> Planejar</h4><input value={scheduleTitle} onChange={e => setScheduleTitle(e.target.value)} placeholder="Título da Ação" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white outline-none focus:ring-2 ring-blue-500/20" /><div className="grid grid-cols-2 gap-3"><input type="date" value={scheduleStart} onChange={e => setScheduleStart(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /><input type="date" value={scheduleEnd} onChange={e => setScheduleEnd(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /></div><textarea value={scheduleObs} onChange={e => setScheduleObs(e.target.value)} placeholder="Observações e detalhes..." className="w-full p-5 border rounded-2xl text-xs font-bold bg-white h-24 resize-none outline-none focus:ring-2 ring-blue-500/20" /><button onClick={saveSchedule} className="w-full bg-blue-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-blue-500/30">Salvar Agendamento</button></div>
-                <div className="bg-green-50/30 p-8 rounded-[2.5rem] space-y-6 border border-green-100"><h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-green-800"><History className="w-5 h-5 text-green-600"/> Registrar</h4><input value={visitTitle} onChange={e => setVisitTitle(e.target.value)} placeholder="Título da Missão" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white" /><div className="grid grid-cols-2 gap-3"><input type="date" value={visitStart} onChange={e => setVisitStart(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /><input type="date" value={visitEnd} onChange={e => setVisitEnd(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /></div><input type="number" value={visitAttendance} onChange={(e) => setVisitAttendance(Number(e.target.value) || 0)} placeholder="Total de Assistidos" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white" /><textarea value={visitObs} onChange={e => setVisitObs(e.target.value)} placeholder="Principais ocorrências..." className="w-full p-5 border rounded-2xl text-xs font-bold bg-white h-24 resize-none" /><button onClick={saveVisit} className="w-full bg-green-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-green-500/30">Registrar Missão</button></div>
-                <div className="bg-orange-50/50 p-8 rounded-[2.5rem] space-y-6 border border-orange-100">
-                  <h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-orange-800"><MapPin className="w-5 h-5 text-orange-600"/> Novo Marcador</h4>
-                  <div className="flex gap-2">
-                    <input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder="Ex: Sede, Base, Porto..." className="flex-1 p-5 border rounded-2xl text-sm font-bold bg-white outline-none focus:ring-2 ring-orange-500/20" />
-                    <button onClick={saveToMarkerLibrary} className="p-4 bg-white border border-orange-200 rounded-2xl hover:bg-orange-100 transition-all text-orange-600 shadow-sm" title="Salvar na Biblioteca"><Bookmark className="w-5 h-5"/></button>
-                  </div>
-
-                  {markerLibrary.length > 0 && (
-                    <div className="space-y-3 py-2 border-t border-orange-100/50">
-                      <p className="text-[9px] font-black uppercase text-orange-400 tracking-widest">Sua Biblioteca</p>
-                      <div className="flex flex-wrap gap-2">
-                        {markerLibrary.map((libMarker) => (
-                          <div key={libMarker.id} className="group relative">
-                            <button 
-                              onClick={() => addMarker(libMarker.label, libMarker.color)} 
-                              className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-100 rounded-xl hover:border-orange-400 hover:shadow-md transition-all text-[10px] font-bold text-slate-700"
-                            >
-                              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: libMarker.color }} />
-                              {libMarker.label}
-                            </button>
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); removeFromMarkerLibrary(libMarker.id); }} 
-                              className="absolute -top-1 -right-1 bg-white text-red-500 p-0.5 rounded-full border border-red-100 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                            >
-                              <X className="w-2.5 h-2.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
+              
+              {!isReadOnly && (
+                <div className="space-y-10 pt-10 border-t">
+                  <div className="bg-blue-50/50 p-8 rounded-[2.5rem] space-y-6 border border-blue-100"><h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-blue-800"><Calendar className="w-5 h-5 text-blue-600"/> Planejar</h4><input value={scheduleTitle} onChange={e => setScheduleTitle(e.target.value)} placeholder="Título da Ação" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white outline-none focus:ring-2 ring-blue-500/20" /><div className="grid grid-cols-2 gap-3"><input type="date" value={scheduleStart} onChange={e => setScheduleStart(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /><input type="date" value={scheduleEnd} onChange={e => setScheduleEnd(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /></div><textarea value={scheduleObs} onChange={e => setScheduleObs(e.target.value)} placeholder="Observações e detalhes..." className="w-full p-5 border rounded-2xl text-xs font-bold bg-white h-24 resize-none outline-none focus:ring-2 ring-blue-500/20" /><button onClick={saveSchedule} className="w-full bg-blue-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-blue-500/30">Salvar Agendamento</button></div>
+                  <div className="bg-green-50/30 p-8 rounded-[2.5rem] space-y-6 border border-green-100"><h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-green-800"><History className="w-5 h-5 text-green-600"/> Registrar</h4><input value={visitTitle} onChange={e => setVisitTitle(e.target.value)} placeholder="Título da Missão" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white" /><div className="grid grid-cols-2 gap-3"><input type="date" value={visitStart} onChange={e => setVisitStart(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /><input type="date" value={visitEnd} onChange={e => setVisitEnd(e.target.value)} className="w-full p-4 border rounded-2xl text-[10px] font-bold bg-white" /></div><input type="number" value={visitAttendance} onChange={(e) => setVisitAttendance(Number(e.target.value) || 0)} placeholder="Total de Assistidos" className="w-full p-5 border rounded-2xl text-sm font-bold bg-white" /><textarea value={visitObs} onChange={e => setVisitObs(e.target.value)} placeholder="Principais ocorrências..." className="w-full p-5 border rounded-2xl text-xs font-bold bg-white h-24 resize-none" /><button onClick={saveVisit} className="w-full bg-green-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-green-500/30">Registrar Missão</button></div>
+                  <div className="bg-orange-50/50 p-8 rounded-[2.5rem] space-y-6 border border-orange-100">
+                    <h4 className="text-[11px] font-black uppercase flex items-center gap-3 text-orange-800"><MapPin className="w-5 h-5 text-orange-600"/> Novo Marcador</h4>
+                    <div className="flex gap-2">
+                      <input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder="Ex: Sede, Base, Porto..." className="flex-1 p-5 border rounded-2xl text-sm font-bold bg-white outline-none focus:ring-2 ring-orange-500/20" />
+                      <button onClick={saveToMarkerLibrary} className="p-4 bg-white border border-orange-200 rounded-2xl hover:bg-orange-100 transition-all text-orange-600 shadow-sm" title="Salvar na Biblioteca"><Bookmark className="w-5 h-5"/></button>
                     </div>
-                  )}
 
-                  <div className="flex gap-2 flex-wrap max-h-32 overflow-y-auto custom-scrollbar p-1">
-                    {PRESET_COLORS.map(c => (<button key={c} onClick={() => setMarkerColor(c)} className={`w-8 h-8 rounded-xl border-2 transition-transform active:scale-90 ${markerColor === c ? 'border-slate-900 scale-110' : 'border-transparent opacity-60'}`} style={{backgroundColor: c}} />))}
+                    {markerLibrary.length > 0 && (
+                      <div className="space-y-3 py-2 border-t border-orange-100/50">
+                        <p className="text-[9px] font-black uppercase text-orange-400 tracking-widest">Sua Biblioteca</p>
+                        <div className="flex flex-wrap gap-2">
+                          {markerLibrary.map((libMarker) => (
+                            <div key={libMarker.id} className="group relative">
+                              <button 
+                                onClick={() => addMarker(libMarker.label, libMarker.color)} 
+                                className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-100 rounded-xl hover:border-orange-400 hover:shadow-md transition-all text-[10px] font-bold text-slate-700"
+                              >
+                                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: libMarker.color }} />
+                                {libMarker.label}
+                              </button>
+                              <button 
+                                onClick={(e) => { e.stopPropagation(); removeFromMarkerLibrary(libMarker.id); }} 
+                                className="absolute -top-1 -right-1 bg-white text-red-500 p-0.5 rounded-full border border-red-100 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                              >
+                                <X className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex gap-2 flex-wrap max-h-32 overflow-y-auto custom-scrollbar p-1">
+                      {PRESET_COLORS.map(c => (<button key={c} onClick={() => setMarkerColor(c)} className={`w-8 h-8 rounded-xl border-2 transition-transform active:scale-90 ${markerColor === c ? 'border-slate-900 scale-110' : 'border-transparent opacity-60'}`} style={{backgroundColor: c}} />))}
+                    </div>
+                    <button onClick={() => addMarker()} className="w-full bg-orange-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-orange-500/30">Fixar no Mapa</button>
                   </div>
-                  <button onClick={() => addMarker()} className="w-full bg-orange-600 text-white p-5 rounded-[1.5rem] text-xs font-black uppercase shadow-lg shadow-orange-500/30">Fixar no Mapa</button>
                 </div>
-              </div>
+              )}
             </motion.aside>
           )}</AnimatePresence>
       </main>
@@ -896,47 +946,62 @@ const App: React.FC = () => {
       <AnimatePresence>{showCloudConfig && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[600] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => setShowCloudConfig(false)}>
             <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-white w-full max-w-lg rounded-[2.5rem] overflow-hidden shadow-4xl" onClick={e => e.stopPropagation()}>
-              <header className="p-8 bg-slate-900 text-white flex justify-between items-center">
-                <div className="flex items-center gap-4"><Database className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Sincronização Cloud</h2></div>
+              <header className={`p-8 bg-slate-900 text-white flex justify-between items-center`}>
+                <div className="flex items-center gap-4"><Database className="w-6 h-6 text-green-500"/><h2 className="text-xl font-black uppercase">Configurações Cloud</h2></div>
                 <button onClick={() => setShowCloudConfig(false)} className="p-2 hover:bg-white/10 rounded-full transition-all"><X/></button>
               </header>
               <div className="p-10 space-y-8">
+                <div className="p-6 bg-blue-50 border rounded-2xl space-y-4 border-blue-200">
+                  <div className="flex items-center gap-3 border-b border-blue-100 pb-2">
+                    <Share2 className="w-5 h-5 text-blue-600"/>
+                    <p className="text-[11px] font-black text-blue-800 uppercase tracking-widest">Compartilhar Mapa</p>
+                  </div>
+                  <p className="text-[10px] text-blue-600 font-bold leading-relaxed">Gere um link seguro para que outras pessoas visualizem os dados em tempo real sem permissão de alteração.</p>
+                  <button onClick={generateViewLink} className="w-full bg-blue-600 text-white p-4 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-blue-500 transition-all shadow-lg shadow-blue-500/20">
+                    <LinkIcon className="w-4 h-4"/> Gerar Link de Consulta
+                  </button>
+                </div>
+
                 <div className="p-6 bg-slate-50 border rounded-2xl space-y-4 border-slate-200">
-                  <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Seu ID de Sincronização</p>
+                  <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Seu ID de Administração</p>
                   <div className="flex flex-col gap-3">
                     <div className="p-4 bg-white border border-slate-200 rounded-xl flex items-center justify-between">
                       <code className="text-sm font-black text-slate-900 tracking-widest">{syncId}</code>
                       <div className={`w-3 h-3 rounded-full ${syncStatus === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
                     </div>
-                    <button onClick={copySyncId} className="w-full bg-slate-900 text-white p-4 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
-                      <Copy className="w-4 h-4 text-green-400"/> Copiar ID para outro computador
-                    </button>
+                    {!isReadOnly && (
+                      <button onClick={copySyncId} className="w-full bg-slate-900 text-white p-4 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
+                        <Copy className="w-4 h-4 text-green-400"/> Copiar ID de Admin
+                      </button>
+                    )}
                   </div>
                 </div>
 
-                <div className="p-6 bg-slate-50 border rounded-2xl space-y-4 border-slate-200">
-                  <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Vincular Novo Dispositivo</p>
-                  <p className="text-[10px] text-slate-500 font-bold">Cole o ID de outro computador para espelhar os dados automaticamente.</p>
-                  <div className="flex gap-2">
-                    <input 
-                      type="text" 
-                      value={identityInput} 
-                      onChange={e => setIdentityInput(e.target.value)} 
-                      placeholder="Ex: DPE-A1B2C3D4" 
-                      className="flex-1 p-4 border rounded-xl text-xs font-bold outline-none bg-white border-slate-300 focus:border-green-500 uppercase" 
-                    />
-                    <button onClick={handleLinkSyncId} className="bg-green-600 text-white px-6 rounded-xl text-[10px] font-black uppercase hover:bg-green-500 shadow-lg shadow-green-500/20">Vincular</button>
+                {!isReadOnly && (
+                  <div className="p-6 bg-slate-50 border rounded-2xl space-y-4 border-slate-200">
+                    <p className="text-[11px] font-black text-slate-800 uppercase tracking-widest border-b pb-2">Alternar Conta / Acesso</p>
+                    <p className="text-[10px] text-slate-500 font-bold">Vincule-se a outro banco de dados inserindo um ID de Admin.</p>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        value={identityInput} 
+                        onChange={e => setIdentityInput(e.target.value)} 
+                        placeholder="Ex: DPE-A1B2C3D4" 
+                        className="flex-1 p-4 border rounded-xl text-xs font-bold outline-none bg-white border-slate-300 focus:border-green-500 uppercase" 
+                      />
+                      <button onClick={handleLinkSyncId} className="bg-green-600 text-white px-6 rounded-xl text-[10px] font-black uppercase hover:bg-green-500 shadow-lg shadow-green-500/20">Vincular</button>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <div className="pt-4 flex items-center justify-between text-[10px] font-black uppercase text-slate-400">
                   <div className="flex items-center gap-2">
-                    <Wifi className="w-3 h-3"/>
-                    Supabase Realtime Cloud
+                    <ShieldCheck className="w-3 h-3"/>
+                    Acesso: {isReadOnly ? 'Consulta' : 'Administrador'}
                   </div>
                   <div className="flex items-center gap-2">
-                    <RefreshCw className={`w-3 h-3 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`}/>
-                    {syncStatus === 'syncing' ? 'Sincronizando...' : syncStatus === 'connected' ? 'Conectado e Ativo' : 'Aguardando'}
+                    <Wifi className="w-3 h-3"/>
+                    {syncStatus === 'connected' ? 'Servidor Ativo' : 'Desconectado'}
                   </div>
                 </div>
               </div>
@@ -948,16 +1013,16 @@ const App: React.FC = () => {
         {showReport && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[500] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-6 no-print" onClick={() => setShowReport(false)}>
             <motion.div initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }} className="bg-white w-full max-w-6xl rounded-[3rem] overflow-hidden shadow-4xl flex flex-col h-[90vh] print-expand" onClick={e => e.stopPropagation()}>
-               <header className="p-8 lg:p-10 bg-slate-900 text-white flex justify-between items-center shrink-0">
+               <header className={`p-8 lg:p-10 ${isReadOnly ? 'bg-slate-900 border-b-4 border-blue-500' : 'bg-slate-900 border-b-4 border-green-500'} text-white flex justify-between items-center shrink-0`}>
                   <div className="flex items-center gap-4">
-                    <div className="bg-green-600 p-3 rounded-2xl"><BarChart3 className="w-8 h-8 text-white"/></div>
+                    <div className={`${isReadOnly ? 'bg-blue-600' : 'bg-green-600'} p-3 rounded-2xl`}><BarChart3 className="w-8 h-8 text-white"/></div>
                     <div>
                       <h2 className="text-2xl font-black uppercase tracking-tight leading-tight">Painel de Impacto Regional</h2>
-                      <p className="text-[10px] font-bold text-green-400 uppercase tracking-widest opacity-80">Relatório Estratégico AM Itinerante</p>
+                      <p className={`text-[10px] font-bold ${isReadOnly ? 'text-blue-400' : 'text-green-400'} uppercase tracking-widest opacity-80`}>Relatório Estratégico AM Itinerante</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3 no-print">
-                    <button onClick={() => window.print()} className="px-5 py-3 bg-green-600 hover:bg-green-500 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 transition-all"><Printer className="w-4 h-4"/> Imprimir Dossiê</button>
+                    <button onClick={() => window.print()} className={`${isReadOnly ? 'bg-blue-600 hover:bg-blue-500' : 'bg-green-600 hover:bg-green-500'} px-5 py-3 rounded-xl text-[10px] font-black uppercase flex items-center gap-2 transition-all`}><Printer className="w-4 h-4"/> Imprimir Dossiê</button>
                     <button onClick={() => setShowReport(false)} className="p-4 bg-white/5 hover:bg-white/10 rounded-2xl transition-all"><X/></button>
                   </div>
                </header>
@@ -965,7 +1030,7 @@ const App: React.FC = () => {
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                     <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 print-shadow-none space-y-3 relative overflow-hidden">
                       <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Cobertura Estadual</p>
-                      <div className="flex items-baseline gap-2"><h3 className="text-4xl font-black text-slate-900">{dashboardStats.coveragePercent}%</h3><span className="text-xs font-bold text-green-600">({dashboardStats.visitedCount}/62)</span></div>
+                      <div className="flex items-baseline gap-2"><h3 className="text-4xl font-black text-slate-900">{dashboardStats.coveragePercent}%</h3><span className={`text-xs font-bold ${isReadOnly ? 'text-blue-600' : 'text-green-600'}`}>({dashboardStats.visitedCount}/62)</span></div>
                     </div>
                     <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 print-shadow-none space-y-3 relative overflow-hidden">
                       <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assistidos Totais</p>
@@ -1012,7 +1077,7 @@ const App: React.FC = () => {
                           return (
                             <div key={city.id} className="space-y-2">
                               <div className="flex justify-between items-end"><span className="text-[10px] font-black uppercase text-slate-600">{city.name}</span><span className="text-xs font-black text-slate-900">{city.visits.length} Missões</span></div>
-                              <div className="w-full h-3 bg-slate-50 rounded-full overflow-hidden border"><div style={{width: `${percent}%`}} className={`h-full ${i === 0 ? 'bg-green-600' : 'bg-slate-700'}`} /></div>
+                              <div className="w-full h-3 bg-slate-50 rounded-full overflow-hidden border"><div style={{width: `${percent}%`}} className={`h-full ${i === 0 ? (isReadOnly ? 'bg-blue-600' : 'bg-green-600') : 'bg-slate-700'}`} /></div>
                             </div>
                           );
                         })}
@@ -1023,7 +1088,7 @@ const App: React.FC = () => {
                         <div className="relative w-40 h-40">
                            <svg viewBox="0 0 100 100" className="w-full h-full transform -rotate-90">
                              <circle cx="50" cy="50" r="45" fill="none" stroke="#f1f5f9" strokeWidth="10"/>
-                             <circle cx="50" cy="50" r="45" fill="none" stroke="#16a34a" strokeWidth="10" strokeDasharray={`${dashboardStats.coveragePercent * 2.82} 283`} strokeLinecap="round" />
+                             <circle cx="50" cy="50" r="45" fill="none" stroke={isReadOnly ? "#2563eb" : "#16a34a"} strokeWidth="10" strokeDasharray={`${dashboardStats.coveragePercent * 2.82} 283`} strokeLinecap="round" />
                            </svg>
                            <div className="absolute inset-0 flex flex-col items-center justify-center"><span className="text-3xl font-black text-slate-900">{dashboardStats.coveragePercent}%</span></div>
                         </div>
@@ -1038,11 +1103,11 @@ const App: React.FC = () => {
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {dashboardStats.tableData.map(m => (
-                            <tr key={m.id} className="hover:bg-green-50/50 transition-colors">
+                            <tr key={m.id} className={`hover:${isReadOnly ? 'bg-blue-50/50' : 'bg-green-50/50'} transition-colors`}>
                               <td className="p-6 font-black uppercase text-slate-800 text-xs">{m.name}</td>
                               <td className="p-6 font-black text-slate-600">{m.visits.length}</td>
                               <td className="p-6 font-black text-slate-900">{m.visits.reduce((acc, v) => acc + (v.attendanceCount || 0), 0).toLocaleString()}</td>
-                              <td className="p-6 text-right no-print"><button onClick={() => { setShowReport(false); focusCity(m.id); }} className="p-3 bg-slate-100 hover:bg-green-600 hover:text-white rounded-xl transition-all"><Target className="w-4 h-4"/></button></td>
+                              <td className="p-6 text-right no-print"><button onClick={() => { setShowReport(false); focusCity(m.id); }} className={`p-3 bg-slate-100 ${isReadOnly ? 'hover:bg-blue-600' : 'hover:bg-green-600'} hover:text-white rounded-xl transition-all`}><Target className="w-4 h-4"/></button></td>
                             </tr>
                           ))}
                         </tbody>
